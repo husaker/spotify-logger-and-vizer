@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import gspread
 
-
 REGISTRY_TAB = "registry"
 REGISTRY_HEADERS = ["user_sheet_id", "enabled", "created_at", "last_seen_at", "last_sync_at", "last_error"]
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -19,18 +23,15 @@ class RegistryUser:
 def ensure_registry_headers(ws: gspread.Worksheet) -> None:
     values = ws.row_values(1)
     if values != REGISTRY_HEADERS:
-        # перезаписываем заголовки (безопасно для пустой или новой таблицы)
         ws.update("A1:F1", [REGISTRY_HEADERS])
 
 
 def read_registry(ws: gspread.Worksheet) -> list[RegistryUser]:
-    # ожидаем заголовок в первой строке
     rows: list[list[Any]] = ws.get_all_values()
     if not rows:
         return []
     header = rows[0]
     if header != REGISTRY_HEADERS:
-        # на всякий случай: не падаем, а вернём пусто
         return []
     out: list[RegistryUser] = []
     for r in rows[1:]:
@@ -42,3 +43,28 @@ def read_registry(ws: gspread.Worksheet) -> list[RegistryUser]:
         if sheet_id:
             out.append(RegistryUser(user_sheet_id=sheet_id, enabled=enabled))
     return out
+
+
+def upsert_registry_user(ws: gspread.Worksheet, user_sheet_id: str, enabled: bool) -> None:
+    """
+    If user_sheet_id exists → update enabled + last_seen_at.
+    Else → append a new row.
+    """
+    ensure_registry_headers(ws)
+
+    all_values = ws.get_all_values()
+    # find row index (1-based, header is row 1)
+    target_row = None
+    for i, r in enumerate(all_values[1:], start=2):
+        if len(r) >= 1 and r[0].strip() == user_sheet_id:
+            target_row = i
+            break
+
+    now = _now_iso()
+    if target_row is None:
+        row = [user_sheet_id, "true" if enabled else "false", now, now, "", ""]
+        ws.append_row(row, value_input_option="RAW")
+    else:
+        # update columns B (enabled) and D (last_seen_at)
+        ws.update(f"B{target_row}", [["true" if enabled else "false"]])
+        ws.update(f"D{target_row}", [[now]])
