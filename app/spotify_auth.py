@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import base64
-import os
 import secrets
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
 import requests
+from requests import Response
 
+from common.retry import with_retry
 
 SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
@@ -40,6 +41,64 @@ def _basic_auth_header(client_id: str, client_secret: str) -> str:
     return f"Basic {b64}"
 
 
+def _retry_after_from_response(r: Response) -> float | None:
+    ra = r.headers.get("Retry-After")
+    if not ra:
+        return None
+    try:
+        return float(ra)
+    except ValueError:
+        return None
+
+
+def _spotify_post_form_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    data: dict[str, str],
+) -> dict[str, Any]:
+    """
+    Robust POST for Spotify Accounts API:
+    - retries on 429 (Retry-After) and 5xx
+    - retries on transient network errors
+    - fails fast on 4xx except 429
+    """
+
+    def do() -> dict[str, Any]:
+        r = requests.post(url, headers=headers, data=data, timeout=30)
+
+        if 200 <= r.status_code < 300:
+            return r.json() if r.text else {}
+
+        # retryable
+        if r.status_code == 429 or 500 <= r.status_code < 600:
+            err = RuntimeError(f"Spotify token retryable: {r.status_code} | {r.text}")
+            setattr(err, "_response", r)
+            raise err
+
+        # non-retryable
+        raise RuntimeError(f"Spotify token failed: {r.status_code} | {r.text}")
+
+    def should_retry(e: Exception) -> bool:
+        if isinstance(e, requests.RequestException):
+            return True
+        return str(e).startswith("Spotify token retryable:")
+
+    def get_retry_after_seconds(e: Exception) -> float | None:
+        r = getattr(e, "_response", None)
+        if isinstance(r, Response):
+            return _retry_after_from_response(r)
+        return None
+
+    return with_retry(
+        do,
+        should_retry=should_retry,
+        get_retry_after_seconds=get_retry_after_seconds,
+        attempts=5,
+        base_sleep=1.0,
+    )
+
+
 def exchange_code_for_token(
     client_id: str,
     client_secret: str,
@@ -55,9 +114,9 @@ def exchange_code_for_token(
         "code": code,
         "redirect_uri": redirect_uri,
     }
-    r = requests.post(SPOTIFY_TOKEN_URL, headers=headers, data=data, timeout=30)
-    r.raise_for_status()
-    j: dict[str, Any] = r.json()
+
+    j = _spotify_post_form_json(SPOTIFY_TOKEN_URL, headers=headers, data=data)
+
     return SpotifyTokens(
         access_token=j["access_token"],
         refresh_token=j.get("refresh_token"),
@@ -74,9 +133,9 @@ def refresh_access_token(client_id: str, client_secret: str, refresh_token: str)
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
     }
-    r = requests.post(SPOTIFY_TOKEN_URL, headers=headers, data=data, timeout=30)
-    r.raise_for_status()
-    j: dict[str, Any] = r.json()
+
+    j = _spotify_post_form_json(SPOTIFY_TOKEN_URL, headers=headers, data=data)
+
     return SpotifyTokens(
         access_token=j["access_token"],
         refresh_token=j.get("refresh_token"),  # sometimes absent
@@ -85,15 +144,43 @@ def refresh_access_token(client_id: str, client_secret: str, refresh_token: str)
 
 
 def get_spotify_user_id(access_token: str) -> str:
-    headers = {"Authorization": f"Bearer {access_token}"}
-    r = requests.get(SPOTIFY_ME_URL, headers=headers, timeout=30)
+    """
+    Retries only on 429/5xx/network. Fails fast on other 4xx (e.g., 403 country unavailable).
+    """
 
-    if r.status_code != 200:
-        # Важно: Spotify обычно возвращает подробности в JSON
+    def do() -> str:
+        headers = {"Authorization": f"Bearer {access_token}"}
+        r = requests.get(SPOTIFY_ME_URL, headers=headers, timeout=30)
+
+        if 200 <= r.status_code < 300:
+            j: dict[str, Any] = r.json()
+            return str(j["id"])
+
+        if r.status_code == 429 or 500 <= r.status_code < 600:
+            err = RuntimeError(f"Spotify /me retryable: {r.status_code} | {r.text}")
+            setattr(err, "_response", r)
+            raise err
+
         raise RuntimeError(f"/me failed: {r.status_code} | {r.text}")
 
-    j: dict[str, Any] = r.json()
-    return str(j["id"])
+    def should_retry(e: Exception) -> bool:
+        if isinstance(e, requests.RequestException):
+            return True
+        return str(e).startswith("Spotify /me retryable:")
+
+    def get_retry_after_seconds(e: Exception) -> float | None:
+        r = getattr(e, "_response", None)
+        if isinstance(r, Response):
+            return _retry_after_from_response(r)
+        return None
+
+    return with_retry(
+        do,
+        should_retry=should_retry,
+        get_retry_after_seconds=get_retry_after_seconds,
+        attempts=4,
+        base_sleep=1.0,
+    )
 
 
 def make_state() -> str:

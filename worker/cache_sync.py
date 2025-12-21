@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import gspread
+from app.gspread_retry import gcall
 
 from app.spotify_api import get_albums, get_artists, get_tracks
 
@@ -117,7 +118,7 @@ def _batch_update_rows(ws: gspread.Worksheet, updates: list[tuple[int, list[Any]
         chunk = updates[i : i + chunk_size]
         data = [{"range": _a1_row_range(row_idx, len(values)), "values": [values]} for row_idx, values in chunk]
         # value_input_option applies to the entire batch
-        ws.batch_update(data, value_input_option="RAW")
+        gcall(lambda: ws.batch_update(data, value_input_option="RAW"))
 
 def _upsert(ws: gspread.Worksheet, key_to_row: dict[str, int], rows: list[list[Any]]) -> None:
     """
@@ -142,7 +143,7 @@ def _upsert(ws: gspread.Worksheet, key_to_row: dict[str, int], rows: list[list[A
 
     # Append new in one request
     if to_append:
-        ws.append_rows(to_append, value_input_option="RAW")
+        gcall(lambda: ws.append_rows(to_append, value_input_option="RAW"))
 
 
 def enrich_caches_for_tracks(

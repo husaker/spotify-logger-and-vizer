@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import gspread
+from app.gspread_retry import gcall
 
 REGISTRY_TAB = "registry"
 REGISTRY_HEADERS = ["user_sheet_id", "enabled", "created_at", "last_seen_at", "last_sync_at", "last_error"]
@@ -52,8 +53,8 @@ def upsert_registry_user(ws: gspread.Worksheet, user_sheet_id: str, enabled: boo
     """
     ensure_registry_headers(ws)
 
-    all_values = ws.get_all_values()
-    # find row index (1-based, header is row 1)
+    all_values = gcall(lambda: ws.get_all_values())
+
     target_row = None
     for i, r in enumerate(all_values[1:], start=2):
         if len(r) >= 1 and r[0].strip() == user_sheet_id:
@@ -61,13 +62,19 @@ def upsert_registry_user(ws: gspread.Worksheet, user_sheet_id: str, enabled: boo
             break
 
     now = _now_iso()
+    enabled_str = "true" if enabled else "false"
+
     if target_row is None:
-        row = [user_sheet_id, "true" if enabled else "false", now, now, "", ""]
-        ws.append_row(row, value_input_option="RAW")
-    else:
-        # update columns B (enabled) and D (last_seen_at)
-        ws.update(f"B{target_row}", [["true" if enabled else "false"]])
-        ws.update(f"D{target_row}", [[now]])
+        row = [user_sheet_id, enabled_str, now, now, "", ""]
+        gcall(lambda: ws.append_row(row, value_input_option="RAW"))
+        return
+
+    # one request instead of two
+    data = [
+        {"range": f"B{target_row}", "values": [[enabled_str]]},
+        {"range": f"D{target_row}", "values": [[now]]},
+    ]
+    gcall(lambda: ws.batch_update(data, value_input_option="RAW"))
 
 def update_registry_status(
     ws: gspread.Worksheet,
@@ -91,9 +98,9 @@ def update_registry_status(
         return
 
     now = _now_iso()
-    ws.update(f"D{target_row}", [[now]])
+    gcall(lambda: ws.update(f"D{target_row}", [[now]]))
 
     if last_sync_at is not None:
-        ws.update(f"E{target_row}", [[last_sync_at]])
+        gcall(lambda: ws.update(f"E{target_row}", [[last_sync_at]]))
     if last_error is not None:
-        ws.update(f"F{target_row}", [[last_error]])
+        gcall(lambda: ws.update(f"F{target_row}", [[last_error]]))

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import gspread
+from app.gspread_retry import gcall
 
 from app.crypto import decrypt_str
 from app.spotify_auth import refresh_access_token
@@ -95,9 +96,9 @@ def sync_user_sheet(
             max_played_ms = played_ms
 
     if new_rows:
-        ws_log.append_rows(new_rows, value_input_option="RAW")
-        append_dedupe_keys(ws_ded, new_keys)
-        write_app_state_kv(ss, {"last_synced_after_ts": str(max_played_ms), "last_error": ""})
+        gcall(lambda: ws_log.append_rows(new_rows, value_input_option="RAW"))
+        gcall(lambda: append_dedupe_keys(ws_ded, new_keys))
+        gcall(lambda: write_app_state_kv(ss, {"last_synced_after_ts": str(max_played_ms), "last_error": ""}))
         return len(new_rows)
 
     return 0
