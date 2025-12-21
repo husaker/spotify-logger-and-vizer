@@ -38,8 +38,8 @@ SPOTIFY_TEXT = "#FFFFFF"
 SPOTIFY_MUTED = "#B3B3B3"
 SPOTIFY_BORDER = "#2A2A2A"
 
-# Reduce cover size on Top 5 tabs (2x smaller)
-COVER_W = 110
+# Size on Top 5 tabs
+COVER_W = 150
 
 st.markdown(
     f"""
