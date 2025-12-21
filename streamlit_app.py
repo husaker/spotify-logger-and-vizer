@@ -815,23 +815,50 @@ st.markdown("## Dashboard")
 
 with st.sidebar:
     st.markdown("### Time range")
+
+    presets = ["This year", "All time", "Last 7 days", "Last 30 days", "Last 90 days", "Custom"]
     preset = st.selectbox(
         "Quick range",
-        ["Last 7 days", "Last 30 days", "Last 90 days", "Custom"],
-        index=1,
+        presets,
+        index=0,  # дефолт = текущий год
     )
 
     today_utc = datetime.now(timezone.utc).date()
-    if preset == "Last 7 days":
+    current_year = today_utc.year
+
+    # Пытаемся взять самую раннюю дату из данных (если df уже существует)
+    # Важно: played_at_utc должен быть datetime64[ns, UTC] или совместим
+    min_data_date = None
+    try:
+        if "df" in globals() and df is not None and len(df) > 0:
+            s = df["played_at_utc"]
+            # на всякий: приводим к datetime и забираем date()
+            min_data_date = datetime.fromtimestamp(pd.to_datetime(s, utc=True).min().timestamp(), tz=timezone.utc).date()
+    except Exception:
+        min_data_date = None
+
+    if preset == "This year":
+        default_from = date(current_year, 1, 1)
+        default_to = today_utc
+
+    elif preset == "All time":
+        # если нет данных — fallback на текущий год
+        default_from = min_data_date or date(current_year, 1, 1)
+        default_to = today_utc
+
+    elif preset == "Last 7 days":
         default_from = (datetime.now(timezone.utc) - timedelta(days=7)).date()
         default_to = today_utc
+
     elif preset == "Last 30 days":
         default_from = (datetime.now(timezone.utc) - timedelta(days=30)).date()
         default_to = today_utc
+
     elif preset == "Last 90 days":
         default_from = (datetime.now(timezone.utc) - timedelta(days=90)).date()
         default_to = today_utc
-    else:
+
+    else:  # Custom
         default_from = (datetime.now(timezone.utc) - timedelta(days=30)).date()
         default_to = today_utc
 
@@ -843,7 +870,7 @@ with st.sidebar:
         date_to = picked
 
     st.markdown('<div class="small-muted">Rendering happens only on button click.</div>', unsafe_allow_html=True)
-    if st.button("▶ Render dashboard", use_container_width=True):
+    if st.button("▶ Render dashboard", width="stretch"):
         st.session_state["render_dashboard"] = True
         st.session_state["refresh_key"] += 1
         st.rerun()
