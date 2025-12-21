@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time
 from typing import Any
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
+from zoneinfo import ZoneInfo
 import gspread
 
 from app.crypto import encrypt_str
@@ -36,6 +37,9 @@ SPOTIFY_CARD = "#181818"
 SPOTIFY_TEXT = "#FFFFFF"
 SPOTIFY_MUTED = "#B3B3B3"
 SPOTIFY_BORDER = "#2A2A2A"
+
+# Reduce cover size on Top 5 tabs (x2 smaller)
+COVER_W = 110  # was ~220
 
 st.markdown(
     f"""
@@ -89,16 +93,22 @@ h1, h2, h3, h4 {{
   border-radius: 14px;
   overflow: hidden;
 }}
+.small-muted {{
+  color: {SPOTIFY_MUTED};
+  font-size: 12px;
+}}
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 # -----------------------------
-# Session state helpers
+# Session state
 # -----------------------------
 if "refresh_key" not in st.session_state:
     st.session_state["refresh_key"] = 0
+if "render_dashboard" not in st.session_state:
+    st.session_state["render_dashboard"] = False
 
 # -----------------------------
 # Helpers
@@ -121,7 +131,6 @@ def make_state() -> str:
 
 
 def get_query_param(name: str) -> str | None:
-    # streamlit new API + fallback
     try:
         v = st.query_params.get(name)
         if isinstance(v, list):
@@ -175,18 +184,11 @@ def get_service_account_email(settings) -> str | None:
         return None
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 # ---------- Registry helpers ----------
 def get_registry_ws_best_effort(*, sheets: SheetsClient, settings) -> Any | None:
-    """
-    Returns registry worksheet or None if unavailable.
-    """
     try:
         registry_ss = sheets.open_by_key(settings.registry_sheet_id)
-        registry_ws = sheets.get_or_create_worksheet(registry_ss, REGISTRY_TAB, rows=1000, cols=12)
+        registry_ws = sheets.get_or_create_worksheet(registry_ss, REGISTRY_TAB, rows=2000, cols=20)
         ensure_registry_headers(registry_ws)
         return registry_ws
     except Exception:
@@ -194,9 +196,6 @@ def get_registry_ws_best_effort(*, sheets: SheetsClient, settings) -> Any | None
 
 
 def registry_get_sheet_status(registry_ws, user_sheet_id: str) -> tuple[bool, bool]:
-    """
-    Returns: (registered, enabled_in_registry)
-    """
     try:
         rows = gcall(lambda: registry_ws.get_all_values())
         for r in rows[1:]:
@@ -210,17 +209,25 @@ def registry_get_sheet_status(registry_ws, user_sheet_id: str) -> tuple[bool, bo
         return False, False
 
 
-# ---------- Cached log read (prevents 429 on reruns) ----------
-@st.cache_data(ttl=30, show_spinner=False)
-def cached_log_rows(service_json: str, sheet_id: str, refresh_key: int) -> list[list[str]]:
+# ---------- Cached reads (reduce 429 on reruns) ----------
+@st.cache_data(ttl=45, show_spinner=False)
+def cached_ws_values(service_json: str, sheet_id: str, ws_title: str, refresh_key: int) -> list[list[str]]:
     sheets_local = SheetsClient.from_service_account_json(service_json)
     ss_local = sheets_local.open_by_key(sheet_id)
-    ws = ss_local.worksheet("log")
+    ws = ss_local.worksheet(ws_title)
     return gcall(lambda: ws.get_all_values())
 
 
+def df_from_ws_rows(rows: list[list[str]]) -> pd.DataFrame:
+    if not rows or len(rows) < 2:
+        return pd.DataFrame()
+    header = rows[0]
+    data = rows[1:]
+    return pd.DataFrame(data, columns=header[: len(header)])
+
+
 def load_log_df_cached(settings, sheet_id: str) -> pd.DataFrame:
-    rows = cached_log_rows(settings.google_service_account_json, sheet_id, st.session_state["refresh_key"])
+    rows = cached_ws_values(settings.google_service_account_json, sheet_id, "log", st.session_state["refresh_key"])
     if not rows or len(rows) < 2:
         return pd.DataFrame(columns=["Date", "Track", "Artist", "Spotify ID", "URL"])
 
@@ -240,6 +247,56 @@ def load_log_df_cached(settings, sheet_id: str) -> pd.DataFrame:
     return df
 
 
+def load_cache_tracks_df(settings, sheet_id: str) -> pd.DataFrame:
+    rows = cached_ws_values(settings.google_service_account_json, sheet_id, "__cache_tracks", st.session_state["refresh_key"])
+    df = df_from_ws_rows(rows)
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "track_id","track_name","duration_ms","album_id","album_cover_url","primary_artist_id","artist_ids","track_url","fetched_at"
+        ])
+    return df
+
+
+def load_cache_artists_df(settings, sheet_id: str) -> pd.DataFrame:
+    rows = cached_ws_values(settings.google_service_account_json, sheet_id, "__cache_artists", st.session_state["refresh_key"])
+    df = df_from_ws_rows(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["artist_id","artist_name","artist_cover_url","genres","primary_genre","fetched_at"])
+    return df
+
+
+def load_cache_albums_df(settings, sheet_id: str) -> pd.DataFrame:
+    rows = cached_ws_values(settings.google_service_account_json, sheet_id, "__cache_albums", st.session_state["refresh_key"])
+    df = df_from_ws_rows(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["album_id","album_name","album_cover_url","release_date","fetched_at"])
+    return df
+
+
+def safe_int(x: Any, default: int = 0) -> int:
+    try:
+        return int(float(str(x).strip()))
+    except Exception:
+        return default
+
+
+def render_top_cards(items: list[dict[str, Any]], *, cols: int = 5) -> None:
+    if not items:
+        st.info("No data for selected range.")
+        return
+    grid = st.columns(cols)
+    for i, it in enumerate(items[:cols]):
+        with grid[i % cols]:
+            cover = (it.get("cover") or "").strip()
+            if cover:
+                st.image(cover, width=COVER_W)
+            st.markdown(f"**{it.get('title','')}**")
+            if it.get("subtitle"):
+                st.markdown(f'<div class="small-muted">{it["subtitle"]}</div>', unsafe_allow_html=True)
+            for line in it.get("lines", []):
+                st.markdown(f"<div>{line}</div>", unsafe_allow_html=True)
+
+
 # -----------------------------
 # Header
 # -----------------------------
@@ -249,7 +306,7 @@ st.markdown(
   <div style="font-size:40px;">🎧</div>
   <div>
     <div style="font-size:44px; font-weight:900; line-height:1;">Spotify Logger</div>
-    <div style="color:#B3B3B3; margin-top:6px;">Setup & Spotify connect + Background sync + Dashboard (iteration 1)</div>
+    <div style="color:#B3B3B3; margin-top:6px;">Setup & Spotify connect + Background sync + Dashboard</div>
   </div>
 </div>
 """,
@@ -367,7 +424,7 @@ if code and state_cb:
 # -----------------------------
 state = read_app_state(ss)
 enabled_local = (state.get("enabled") or "false").lower() == "true"
-timezone_name = state.get("timezone") or "UTC"
+timezone_name = (state.get("timezone") or "UTC").strip() or "UTC"
 spotify_connected = bool((state.get("refresh_token_enc") or "").strip())
 spotify_user_id = (state.get("spotify_user_id") or "").strip()
 
@@ -377,7 +434,6 @@ if registry_ws is not None:
     registered, enabled_registry = registry_get_sheet_status(registry_ws, sheet_id)
 background_sync_on = registered and enabled_registry
 
-# If spotify_connected: check if this spotify_user_id already bound elsewhere
 existing_sheet_for_user: str | None = None
 if spotify_connected and spotify_user_id and registry_ws is not None:
     try:
@@ -414,7 +470,6 @@ with c5:
         unsafe_allow_html=True,
     )
 
-# If already has a different sheet bound — show clearly
 if spotify_connected and spotify_user_id and existing_sheet_for_user and existing_sheet_for_user != sheet_id:
     st.warning(
         "⚠️ Этот Spotify аккаунт уже синхронизируется в другой таблице.\n\n"
@@ -448,9 +503,8 @@ if not spotify_connected:
 else:
     st.success("Spotify подключён ✅")
 
-    col1, col2, col3, col4 = st.columns([1.3, 1.3, 1.2, 1.8])
+    col1, col2, col3, col4 = st.columns([1.4, 1.4, 1.3, 1.9])
 
-    # Enable background sync
     with col1:
         if not background_sync_on:
             if st.button("Enable background sync"):
@@ -461,7 +515,6 @@ else:
                     st.error("Нет spotify_user_id в __app_state. Переподключи Spotify.")
                     st.stop()
 
-                # Enforce one-sheet-per-user
                 existing = find_sheet_by_spotify_user_id(registry_ws, spotify_user_id)
                 if existing and existing != sheet_id:
                     st.error(
@@ -471,166 +524,466 @@ else:
                     )
                     st.stop()
 
-                # Register & enable
-                upsert_registry_user(
-                    registry_ws,
-                    user_sheet_id=sheet_id,
-                    enabled=True,
-                    spotify_user_id=spotify_user_id,
-                )
+                # Register & enable (support both signatures)
+                try:
+                    upsert_registry_user(
+                        registry_ws,
+                        user_sheet_id=sheet_id,
+                        enabled=True,
+                        spotify_user_id=spotify_user_id,
+                    )
+                except TypeError:
+                    upsert_registry_user(registry_ws, user_sheet_id=sheet_id, enabled=True)
+
                 write_app_state_kv(ss, {"enabled": "true"})
                 st.success("Background sync enabled ✅")
                 st.rerun()
 
-    # Disable background sync
     with col2:
         if background_sync_on:
             if st.button("Disable background sync"):
                 if registry_ws is None:
                     st.error("Registry sheet недоступен сервис-аккаунту.")
                     st.stop()
-                upsert_registry_user(
-                    registry_ws,
-                    user_sheet_id=sheet_id,
-                    enabled=False,
-                    spotify_user_id=spotify_user_id or None,
-                )
+                try:
+                    upsert_registry_user(
+                        registry_ws,
+                        user_sheet_id=sheet_id,
+                        enabled=False,
+                        spotify_user_id=spotify_user_id or None,
+                    )
+                except TypeError:
+                    upsert_registry_user(registry_ws, user_sheet_id=sheet_id, enabled=False)
+
                 write_app_state_kv(ss, {"enabled": "false"})
                 st.info("Background sync disabled")
                 st.rerun()
 
-    # Refresh
     with col3:
-        if st.button("Refresh dashboard"):
+        if st.button("Refresh data"):
             st.session_state["refresh_key"] += 1
             st.rerun()
 
     with col4:
         st.caption(
-            "Background sync = GitHub Actions cron.\n"
-            "Включается только по кнопке.\n"
-            "Dashboard читает log через cache (меньше шанс словить 429)."
+            "Dashboard читает данные из Google Sheets через cache.\n"
+            "Если словишь 429 — подожди ~60 сек и нажми Refresh data."
         )
 
 st.divider()
 
 # -----------------------------
-# Dashboard iteration 1
+# Dashboard controls (time range picker + render button)
 # -----------------------------
 st.markdown("## Dashboard")
 
+if not st.session_state.get("render_dashboard"):
+    st.info("Выбери диапазон дат в сайдбаре и нажми **Render dashboard**.")
+else:
+    st.success("Dashboard rendered ✅ (можешь менять табы без лишних запросов)")
+
+# We still need minimal df_log bounds for default dates,
+# but only load if Spotify connected OR background sync on OR user wants render.
+# (If you want even stricter, remove this and set defaults = last 30 days always.)
 try:
-    df = load_log_df_cached(settings, sheet_id)
+    df_log_bounds = load_log_df_cached(settings, sheet_id)
 except gspread.exceptions.APIError as e:
     msg = str(e)
     if "Quota exceeded" in msg or "[429]" in msg or "429" in msg:
-        st.warning(
-            "Google Sheets quota exceeded (429).\n\n"
-            "Подожди ~60 секунд и нажми **Refresh dashboard**."
-        )
+        st.warning("Google Sheets quota exceeded (429). Подожди ~60 секунд и нажми **Refresh data**.")
         st.stop()
     raise
 
-if df.empty:
+if df_log_bounds.empty:
     st.info("Пока нет данных в log. Сначала пусть воркер добавит хотя бы несколько прослушиваний.")
     st.stop()
 
-period = st.selectbox(
-    "Period",
-    options=["Last 24 hours", "Last 7 days", "Last 30 days", "Last 90 days", "All time"],
-    index=1,
+min_dt = df_log_bounds["played_at_utc"].min().to_pydatetime()
+max_dt = df_log_bounds["played_at_utc"].max().to_pydatetime()
+
+with st.sidebar:
+    st.markdown("### Time range")
+    preset = st.selectbox(
+        "Quick range",
+        ["Custom", "Last 7 days", "Last 30 days", "Last 90 days", "All time"],
+        index=1,
+    )
+
+    today_utc = datetime.now(timezone.utc).date()
+    if preset == "Last 7 days":
+        default_from = (datetime.now(timezone.utc) - timedelta(days=7)).date()
+        default_to = today_utc
+    elif preset == "Last 30 days":
+        default_from = (datetime.now(timezone.utc) - timedelta(days=30)).date()
+        default_to = today_utc
+    elif preset == "Last 90 days":
+        default_from = (datetime.now(timezone.utc) - timedelta(days=90)).date()
+        default_to = today_utc
+    elif preset == "All time":
+        default_from = min_dt.date()
+        default_to = max_dt.date()
+    else:
+        default_from = (datetime.now(timezone.utc) - timedelta(days=30)).date()
+        default_to = today_utc
+
+    date_from, date_to = st.date_input("From / To", value=(default_from, default_to))
+    st.markdown('<div class="small-muted">Отрисовка — только по кнопке.</div>', unsafe_allow_html=True)
+    if st.button("▶ Render dashboard", use_container_width=True):
+        st.session_state["render_dashboard"] = True
+        st.session_state["refresh_key"] += 1
+        st.rerun()
+
+# Stop early unless user pressed render
+if not st.session_state.get("render_dashboard"):
+    st.stop()
+
+# -----------------------------
+# Load data (log + caches)
+# -----------------------------
+try:
+    df_log = load_log_df_cached(settings, sheet_id)
+    df_ct = load_cache_tracks_df(settings, sheet_id)
+    df_ca = load_cache_artists_df(settings, sheet_id)
+    df_calb = load_cache_albums_df(settings, sheet_id)
+except gspread.exceptions.APIError as e:
+    msg = str(e)
+    if "Quota exceeded" in msg or "[429]" in msg or "429" in msg:
+        st.warning("Google Sheets quota exceeded (429). Подожди ~60 секунд и нажми **Refresh data**.")
+        st.stop()
+    raise
+
+# Filter by date range in user's timezone
+try:
+    tz = ZoneInfo(timezone_name or "UTC")
+except Exception:
+    tz = timezone.utc
+
+start_dt = datetime.combine(date_from, time.min).replace(tzinfo=tz).astimezone(timezone.utc)
+end_dt = datetime.combine(date_to, time.max).replace(tzinfo=tz).astimezone(timezone.utc)
+
+df = df_log.copy()
+df = df[(df["played_at_utc"] >= pd.Timestamp(start_dt)) & (df["played_at_utc"] <= pd.Timestamp(end_dt))].copy()
+
+if df.empty:
+    st.info("В выбранном диапазоне нет данных.")
+    st.stop()
+
+# Normalize cache columns
+df_ct = df_ct.copy()
+df_ct["duration_ms_i"] = df_ct.get("duration_ms", "").apply(lambda x: safe_int(x, 0))
+df_ct["album_id"] = df_ct.get("album_id", "").astype(str)
+df_ct["primary_artist_id"] = df_ct.get("primary_artist_id", "").astype(str)
+
+df_calb = df_calb.copy()
+df_calb["album_id"] = df_calb.get("album_id", "").astype(str)
+
+df_ca = df_ca.copy()
+df_ca["artist_id"] = df_ca.get("artist_id", "").astype(str)
+
+# Enrich plays with cache info
+df = df.rename(columns={"Spotify ID": "track_id"}).copy()
+df["track_id"] = df["track_id"].astype(str)
+
+df = df.merge(
+    df_ct[["track_id", "duration_ms_i", "album_id", "album_cover_url", "primary_artist_id", "track_name"]],
+    on="track_id",
+    how="left",
+)
+df = df.merge(
+    df_calb[["album_id", "album_name", "album_cover_url"]].rename(columns={"album_cover_url": "album_cover_url_from_albums"}),
+    on="album_id",
+    how="left",
+)
+df = df.merge(
+    df_ca[["artist_id", "artist_name", "artist_cover_url", "genres", "primary_genre"]].rename(columns={"artist_id": "primary_artist_id"}),
+    on="primary_artist_id",
+    how="left",
 )
 
-now_utc = datetime.now(timezone.utc)
-if period == "Last 24 hours":
-    since = now_utc - timedelta(hours=24)
-elif period == "Last 7 days":
-    since = now_utc - timedelta(days=7)
-elif period == "Last 30 days":
-    since = now_utc - timedelta(days=30)
-elif period == "Last 90 days":
-    since = now_utc - timedelta(days=90)
-else:
-    since = None
+# pick best cover for track/album/artist
+df["track_cover_url"] = df["album_cover_url"].fillna("")
+df["album_cover_best"] = df["album_cover_url_from_albums"].fillna("")
+df["artist_cover_best"] = df["artist_cover_url"].fillna("")
 
-df_f = df.copy()
-if since is not None:
-    df_f = df_f[df_f["played_at_utc"] >= pd.Timestamp(since)].copy()
+# minutes
+df["minutes"] = (df["duration_ms_i"] / 60000.0).fillna(0.0)
 
-# KPIs
-df_24 = df[df["played_at_utc"] >= pd.Timestamp(now_utc - timedelta(hours=24))]
-df_7 = df[df["played_at_utc"] >= pd.Timestamp(now_utc - timedelta(days=7))]
-df_30 = df[df["played_at_utc"] >= pd.Timestamp(now_utc - timedelta(days=30))]
-
-k1, k2, k3, k4 = st.columns([1, 1, 1, 2])
+# -----------------------------
+# KPIs (for selected period only)
+# -----------------------------
+k1, k2, k3, k4, k5 = st.columns([1, 1, 1, 1, 1.2])
 with k1:
-    kpi_card("Plays • last 24h", str(len(df_24)))
+    kpi_card("Total plays", str(len(df)))
 with k2:
-    kpi_card("Plays • last 7d", str(len(df_7)))
+    kpi_card("Unique tracks", str(df["track_id"].nunique()))
 with k3:
-    kpi_card("Plays • last 30d", str(len(df_30)))
+    kpi_card("Unique artists", str(df["Artist"].nunique()))
 with k4:
-    kpi_card("Plays • selected period", str(len(df_f)))
+    kpi_card("Minutes listened", str(int(round(df["minutes"].sum(), 0))))
+with k5:
+    active_days = df["played_at_utc"].dt.date.nunique()
+    kpi_card("Active days", str(active_days))
 
-st.markdown("### Top")
-left, right = st.columns([1, 1])
+st.divider()
 
-top_artists = (
-    df_f.groupby("Artist", dropna=False)
-    .size()
-    .reset_index(name="plays")
-    .sort_values("plays", ascending=False)
-    .head(15)
+# -----------------------------
+# Tabs
+# -----------------------------
+tab_artists, tab_tracks, tab_albums, tab_monthly, tab_genres, tab_stats, tab_recent = st.tabs(
+    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Monthly avg", "Top 5 Genres", "Statistics", "Recent plays"]
 )
 
-top_tracks = (
-    df_f.groupby(["Track", "Artist"], dropna=False)
-    .size()
-    .reset_index(name="plays")
-    .sort_values("plays", ascending=False)
-    .head(15)
-)
-top_tracks["label"] = top_tracks["Track"].astype(str) + " — " + top_tracks["Artist"].astype(str)
+# ===== Top 5 Artists =====
+with tab_artists:
+    g = (
+        df.groupby(["Artist"], dropna=False)
+        .agg(plays=("track_id", "count"), minutes=("minutes", "sum"))
+        .reset_index()
+        .sort_values(["plays", "minutes"], ascending=False)
+        .head(5)
+    )
 
-with left:
-    st.markdown("**Top artists**")
-    if not top_artists.empty:
+    cover_map = (
+        df.dropna(subset=["Artist"])
+        .groupby("Artist")["artist_cover_best"]
+        .agg(lambda s: next((x for x in s if isinstance(x, str) and x.strip()), ""))
+        .to_dict()
+    )
+
+    items = []
+    for _, r in g.iterrows():
+        name = str(r["Artist"])
+        items.append(
+            {
+                "cover": cover_map.get(name, ""),
+                "title": name,
+                "subtitle": "",
+                "lines": [
+                    f"<span class='small-muted'>Listened tracks:</span> <b>{int(r['plays'])}</b>",
+                    f"<span class='small-muted'>Listened minutes:</span> <b>{int(round(r['minutes'],0))}</b>",
+                ],
+            }
+        )
+    render_top_cards(items, cols=5)
+
+# ===== Top 5 Tracks =====
+with tab_tracks:
+    g = (
+        df.groupby(["Track", "Artist", "track_id"], dropna=False)
+        .agg(plays=("track_id", "count"), minutes=("minutes", "sum"))
+        .reset_index()
+        .sort_values(["plays", "minutes"], ascending=False)
+        .head(5)
+    )
+
+    cover_map = (
+        df.groupby("track_id")["track_cover_url"]
+        .agg(lambda s: next((x for x in s if isinstance(x, str) and x.strip()), ""))
+        .to_dict()
+    )
+
+    items = []
+    for _, r in g.iterrows():
+        tid = str(r["track_id"])
+        items.append(
+            {
+                "cover": cover_map.get(tid, ""),
+                "title": str(r["Track"]),
+                "subtitle": str(r["Artist"]),
+                "lines": [
+                    f"<span class='small-muted'>Times listened:</span> <b>{int(r['plays'])}</b>",
+                    f"<span class='small-muted'>Minutes listened:</span> <b>{int(round(r['minutes'],0))}</b>",
+                ],
+            }
+        )
+    render_top_cards(items, cols=5)
+
+# ===== Top 5 Albums =====
+with tab_albums:
+    g = (
+        df.groupby(["album_id", "album_name"], dropna=False)
+        .agg(plays=("track_id", "count"), minutes=("minutes", "sum"))
+        .reset_index()
+        .sort_values(["plays", "minutes"], ascending=False)
+        .head(5)
+    )
+
+    # cover from albums cache first
+    cover_map = (
+        df.groupby("album_id")["album_cover_best"]
+        .agg(lambda s: next((x for x in s if isinstance(x, str) and x.strip()), ""))
+        .to_dict()
+    )
+
+    items = []
+    for _, r in g.iterrows():
+        aid = str(r["album_id"])
+        name = str(r["album_name"]).strip() or "(Unknown album)"
+        items.append(
+            {
+                "cover": cover_map.get(aid, ""),
+                "title": name,
+                "subtitle": "",
+                "lines": [
+                    f"<span class='small-muted'>Times listened:</span> <b>{int(r['plays'])}</b>",
+                    f"<span class='small-muted'>Minutes listened:</span> <b>{int(round(r['minutes'],0))}</b>",
+                ],
+            }
+        )
+    render_top_cards(items, cols=5)
+
+# ===== Monthly avg (instead of cumulative) + cover on the line =====
+with tab_monthly:
+    st.markdown("### Average per day by month")
+
+    dfm = df.copy()
+    dfm["month"] = dfm["played_at_utc"].dt.to_period("M").dt.to_timestamp()
+
+    # active days per month (days with >=1 play)
+    active_days = (
+        dfm.groupby("month")["played_at_utc"]
+        .apply(lambda s: s.dt.date.nunique())
+        .reset_index(name="active_days")
+    )
+    # month-level totals
+    month_agg = (
+        dfm.groupby("month")
+        .agg(plays=("track_id", "count"), minutes=("minutes", "sum"))
+        .reset_index()
+        .sort_values("month")
+    )
+
+    month_agg = month_agg.merge(active_days, on="month", how="left")
+    month_agg["active_days"] = month_agg["active_days"].fillna(0).astype(int)
+
+    # avoid division by zero
+    month_agg["avg_tracks_per_active_day"] = month_agg.apply(
+        lambda r: (r["plays"] / r["active_days"]) if r["active_days"] > 0 else 0.0,
+        axis=1,
+    )
+    month_agg["avg_minutes_per_active_day"] = month_agg.apply(
+        lambda r: (r["minutes"] / r["active_days"]) if r["active_days"] > 0 else 0.0,
+        axis=1,
+    )
+
+    # top album per month (for cover on line)
+    top_album = (
+        dfm.groupby(["month", "album_id", "album_name"])
+        .size()
+        .reset_index(name="plays_album")
+        .sort_values(["month", "plays_album"], ascending=[True, False])
+    )
+    top_album = top_album.groupby("month").head(1)
+
+    top_album["album_cover_url"] = top_album["album_id"].map(
+        dfm.groupby("album_id")["album_cover_best"].agg(lambda s: next((x for x in s if isinstance(x, str) and x.strip()), "")).to_dict()
+    )
+
+    plays_m = month_agg.merge(top_album[["month", "album_name", "album_cover_url"]], on="month", how="left")
+    plays_m["month_str"] = plays_m["month"].dt.strftime("%Y-%m")
+
+    base = alt.Chart(plays_m).encode(
+        x=alt.X("month_str:N", title=None),
+    )
+
+    line = base.mark_line(color=SPOTIFY_GREEN).encode(
+        y=alt.Y("avg_tracks_per_active_day:Q", title="Avg tracks / active day"),
+        tooltip=["month_str", "avg_tracks_per_active_day", "avg_minutes_per_active_day", "plays", "active_days"],
+    )
+
+    points = base.mark_point(color=SPOTIFY_GREEN, size=70).encode(
+        y="avg_tracks_per_active_day:Q",
+    )
+
+    img_df = plays_m[plays_m["album_cover_url"].fillna("").astype(str).str.len() > 0].copy()
+
+    covers = alt.Chart(img_df).mark_image(width=22, height=22, dy=-16).encode(
+        x="month_str:N",
+        y="avg_tracks_per_active_day:Q",
+        url="album_cover_url:N",
+        tooltip=["month_str", "album_name", "avg_tracks_per_active_day", "plays", "active_days"],
+    )
+
+    st.altair_chart((line + points + covers).properties(height=280), use_container_width=True)
+
+    st.markdown("### Table")
+    show_tbl = plays_m[[
+        "month_str", "plays", "minutes", "active_days",
+        "avg_tracks_per_active_day", "avg_minutes_per_active_day", "album_name"
+    ]].copy()
+    show_tbl["minutes"] = show_tbl["minutes"].round(0).astype(int)
+    show_tbl["avg_tracks_per_active_day"] = show_tbl["avg_tracks_per_active_day"].round(2)
+    show_tbl["avg_minutes_per_active_day"] = show_tbl["avg_minutes_per_active_day"].round(1)
+    st.dataframe(show_tbl, use_container_width=True, hide_index=True)
+
+# ===== Top 5 Genres =====
+with tab_genres:
+    # Prefer primary_genre (already computed at artist cache time)
+    gen = df.copy()
+    gen["primary_genre"] = gen["primary_genre"].fillna("").astype(str).str.strip()
+    gen = gen[gen["primary_genre"].str.len() > 0].copy()
+
+    if gen.empty:
+        st.info("Genres are empty (artist cache may not be filled yet). Run cache enrichment/backfill.")
+    else:
+        g = (
+            gen.groupby("primary_genre")
+            .size()
+            .reset_index(name="plays")
+            .sort_values("plays", ascending=False)
+            .head(5)
+        )
+
+        # Simple bar chart (Spotify green)
         ch = (
-            alt.Chart(top_artists)
+            alt.Chart(g)
             .mark_bar(color=SPOTIFY_GREEN)
             .encode(
-                x=alt.X("plays:Q", title="Plays"),
-                y=alt.Y("Artist:N", sort="-x", title=None),
-                tooltip=["Artist", "plays"],
+                x=alt.X("plays:Q", title="Tracks"),
+                y=alt.Y("primary_genre:N", sort="-x", title=None),
+                tooltip=["primary_genre", "plays"],
             )
-            .properties(height=360)
+            .properties(height=300)
         )
         st.altair_chart(ch, use_container_width=True)
+
+# ===== Statistics =====
+with tab_stats:
+    unique_artists = df["Artist"].nunique()
+    unique_tracks = df["track_id"].nunique()
+    total_tracks = len(df)
+    total_minutes = int(round(df["minutes"].sum(), 0))
+    active_days = df["played_at_utc"].dt.date.nunique()
+
+    fav_genre = ""
+    if "primary_genre" in df.columns:
+        gg = df["primary_genre"].fillna("").astype(str).str.strip()
+        gg = gg[gg.str.len() > 0]
+        if len(gg) > 0:
+            fav_genre = gg.value_counts().index[0]
+
+    st.markdown("### Statistics")
+    s1, s2, s3, s4, s5 = st.columns([1, 1, 1, 1, 1])
+    with s1: kpi_card("Unique artists", str(unique_artists))
+    with s2: kpi_card("Unique tracks", str(unique_tracks))
+    with s3: kpi_card("Total tracks played", str(total_tracks))
+    with s4: kpi_card("Total minutes listened", str(total_minutes))
+    with s5: kpi_card("Active days", str(active_days))
+
+    if fav_genre:
+        st.markdown(f"**Favorite genre:** `{fav_genre}`")
     else:
-        st.info("No data for selected period.")
+        st.markdown("**Favorite genre:** _(not enough genre data yet)_")
 
-with right:
-    st.markdown("**Top tracks**")
-    if not top_tracks.empty:
-        ch = (
-            alt.Chart(top_tracks)
-            .mark_bar(color=SPOTIFY_GREEN)
-            .encode(
-                x=alt.X("plays:Q", title="Plays"),
-                y=alt.Y("label:N", sort="-x", title=None),
-                tooltip=["Track", "Artist", "plays"],
-            )
-            .properties(height=360)
-        )
-        st.altair_chart(ch, use_container_width=True)
-    else:
-        st.info("No data for selected period.")
+# ===== Recent plays =====
+with tab_recent:
+    st.markdown("### Recent plays")
+    show_n = st.slider("Rows", min_value=20, max_value=500, value=100, step=20)
 
-st.markdown("### Recent plays")
-show_n = st.slider("Rows", min_value=20, max_value=500, value=100, step=20)
+    recent = df.sort_values("played_at_utc", ascending=False).head(show_n).copy()
+    recent["Played (UTC)"] = recent["played_at_utc"].dt.strftime("%Y-%m-%d %H:%M")
+    recent = recent[["Played (UTC)", "Track", "Artist", "track_id", "URL", "album_name", "primary_genre"]].rename(
+        columns={"track_id": "Spotify ID"}
+    )
 
-recent = df_f.head(show_n).copy()
-recent["Played (UTC)"] = recent["played_at_utc"].dt.strftime("%Y-%m-%d %H:%M")
-recent = recent[["Played (UTC)", "Track", "Artist", "Spotify ID", "URL"]]
-
-st.dataframe(recent, use_container_width=True, hide_index=True)
+    st.dataframe(recent, use_container_width=True, hide_index=True)
