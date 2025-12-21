@@ -1159,7 +1159,7 @@ with tab_monthly:
         alt.Tooltip("active_days:Q", title="Active days", format=",d"),
     ]
 
-    covers = alt.Chart(img_df).mark_image(width=22, height=22, dy=-16).encode(
+    covers = alt.Chart(img_df).mark_image(width=42, height=42, dy=-32).encode(
         x="month_str:N",
         y="avg_tracks_per_active_day:Q",
         url="album_cover_url:N",
