@@ -1228,13 +1228,11 @@ with tab_fingerprint:
     # --- Timezone presets for this chart (doesn't change app_state timezone)
     tz_presets = {
         "Use sheet timezone": None,                 # то, что уже в app_state (timezone_name)
-        "London (Europe/London)": "Europe/London",
-        "Belgrade (Europe/Belgrade)": "Europe/Belgrade",
-        "Moscow (Europe/Moscow)": "Europe/Moscow",
-        "Europe/Amsterdam",
+        "London": "Europe/London",
+        "Belgrade": "Europe/Belgrade",
+        "Moscow": "Europe/Moscow",
+        "Amsterdam": "Europe/Amsterdam",
         "UTC": "UTC",
-        # если хочешь “обычный” UTC+1/UTC+2 по сезону — можно вместо fixed добавить:
-        # "Central Europe (Europe/Amsterdam)": "Europe/Amsterdam",
     }
 
     # дефолт: "Use sheet timezone"
