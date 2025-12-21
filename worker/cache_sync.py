@@ -100,23 +100,47 @@ def _load_key_to_row_and_fetched(ws: gspread.Worksheet, fetched_col_1based: int)
 
     return key_to_row, key_to_fetched
 
+def _a1_row_range(row_idx: int, ncols: int) -> str:
+    end_col = chr(ord("A") + ncols - 1)
+    return f"A{row_idx}:{end_col}{row_idx}"
 
-def _update_row(ws: gspread.Worksheet, row_idx: int, values: list[Any]) -> None:
-    end_col = chr(ord("A") + len(values) - 1)
-    ws.update(f"A{row_idx}:{end_col}{row_idx}", [values])
 
+def _batch_update_rows(ws: gspread.Worksheet, updates: list[tuple[int, list[Any]]], *, chunk_size: int = 200) -> None:
+    """
+    updates: list of (row_idx, values)
+    Sends in chunks to avoid oversized requests.
+    """
+    if not updates:
+        return
+
+    for i in range(0, len(updates), chunk_size):
+        chunk = updates[i : i + chunk_size]
+        data = [{"range": _a1_row_range(row_idx, len(values)), "values": [values]} for row_idx, values in chunk]
+        # value_input_option applies to the entire batch
+        ws.batch_update(data, value_input_option="RAW")
 
 def _upsert(ws: gspread.Worksheet, key_to_row: dict[str, int], rows: list[list[Any]]) -> None:
+    """
+    Efficient upsert:
+      - existing rows -> batch_update (few requests)
+      - new rows -> append_rows (1 request)
+    """
     to_append: list[list[Any]] = []
+    to_update: list[tuple[int, list[Any]]] = []
+
     for values in rows:
         key = (values[0] or "").strip()
         if not key:
             continue
         if key in key_to_row:
-            _update_row(ws, key_to_row[key], values)
+            to_update.append((key_to_row[key], values))
         else:
             to_append.append(values)
 
+    # Batch update existing
+    _batch_update_rows(ws, to_update, chunk_size=200)
+
+    # Append new in one request
     if to_append:
         ws.append_rows(to_append, value_input_option="RAW")
 
