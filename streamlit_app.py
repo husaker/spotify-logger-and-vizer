@@ -833,7 +833,7 @@ with st.sidebar:
         if "df" in globals() and df is not None and len(df) > 0:
             s = df["played_at_utc"]
             # на всякий: приводим к datetime и забираем date()
-            min_data_date = datetime.fromtimestamp(pd.to_datetime(s, utc=True).min().timestamp(), tz=timezone.utc).date()
+            min_data_date = df["played_at_utc"].min().date() if (df is not None and len(df) > 0) else None
     except Exception:
         min_data_date = None
 
