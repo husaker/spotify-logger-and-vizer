@@ -1052,7 +1052,7 @@ with tab_albums:
 
 # ===== Monthly avg (avg per active day) + cover markers on the line =====
 with tab_monthly:
-    st.markdown("### Average per active day by month")
+    st.markdown("### Average plays per active day by month")
 
     dfm = df.copy()
     dfm["month"] = dfm["played_at_utc"].dt.to_period("M").dt.to_timestamp()
@@ -1100,29 +1100,46 @@ with tab_monthly:
     plays_m = month_agg.merge(top_album[["month", "album_name", "album_cover_url"]], on="month", how="left")
     plays_m["month_str"] = plays_m["month"].dt.strftime("%Y-%m")
 
+    tooltip_main = [
+        alt.Tooltip("month_str:N", title="Month"),
+        alt.Tooltip("avg_tracks_per_active_day:Q", title="Avg tracks / active day", format=".2f"),
+        alt.Tooltip("avg_minutes_per_active_day:Q", title="Avg minutes / active day", format=".1f"),
+        alt.Tooltip("plays:Q", title="Tracks played (total)", format=",d"),
+        alt.Tooltip("active_days:Q", title="Active days", format=",d"),
+    ]
+
     base = alt.Chart(plays_m).encode(
         x=alt.X("month_str:N", title=None),
     )
 
     line = base.mark_line(color=SPOTIFY_GREEN).encode(
         y=alt.Y("avg_tracks_per_active_day:Q", title="Avg tracks / active day"),
-        tooltip=["month_str", "avg_tracks_per_active_day", "avg_minutes_per_active_day", "plays", "active_days"],
+        tooltip=tooltip_main,
     )
 
     points = base.mark_point(color=SPOTIFY_GREEN, size=70).encode(
         y="avg_tracks_per_active_day:Q",
+        tooltip=tooltip_main,  # чтобы на точках тоже было
     )
 
     img_df = plays_m[plays_m["album_cover_url"].fillna("").astype(str).str.len() > 0].copy()
+
+    tooltip_cover = [
+        alt.Tooltip("month_str:N", title="Month"),
+        alt.Tooltip("album_name:N", title="Top album"),
+        alt.Tooltip("avg_tracks_per_active_day:Q", title="Avg tracks / active day", format=".2f"),
+        alt.Tooltip("plays:Q", title="Tracks played (total)", format=",d"),
+        alt.Tooltip("active_days:Q", title="Active days", format=",d"),
+    ]
 
     covers = alt.Chart(img_df).mark_image(width=22, height=22, dy=-16).encode(
         x="month_str:N",
         y="avg_tracks_per_active_day:Q",
         url="album_cover_url:N",
-        tooltip=["month_str", "album_name", "avg_tracks_per_active_day", "plays", "active_days"],
+        tooltip=tooltip_cover,
     )
 
-    st.altair_chart((line + points + covers).properties(height=280), use_container_width=True)
+    st.altair_chart((line + points + covers).properties(height=500), use_container_width=True)
 
 # ===== Top 5 Genres =====
 with tab_genres:
