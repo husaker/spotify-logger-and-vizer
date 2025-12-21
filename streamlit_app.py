@@ -123,6 +123,8 @@ if "registry_cache" not in st.session_state:
     st.session_state["registry_cache"] = {"ts": None, "registered": False, "enabled": False, "existing_sheet": None}
 if "sheet_input" not in st.session_state:
     st.session_state["sheet_input"] = ""
+if "min_data_date" not in st.session_state:
+    st.session_state["min_data_date"] = None  # earliest date in df_log, used for "All time"
 
 # -----------------------------
 # Helpers
@@ -333,7 +335,7 @@ def df_from_ws_rows(rows: list[list[str]]) -> pd.DataFrame:
 def load_log_df_cached(settings, sheet_id: str) -> pd.DataFrame:
     rows = cached_ws_values(settings.google_service_account_json, sheet_id, "log", st.session_state["refresh_key"])
     if not rows or len(rows) < 2:
-        return pd.DataFrame(columns=["Date", "Tracknames", "Artist", "Spotify ID", "URL"])
+        return pd.DataFrame(columns=["Date", "Track", "Artist", "Spotify ID", "URL"])
 
     header = rows[0]
     data = rows[1:]
@@ -352,7 +354,9 @@ def load_log_df_cached(settings, sheet_id: str) -> pd.DataFrame:
 
 
 def load_cache_tracks_df(settings, sheet_id: str) -> pd.DataFrame:
-    rows = cached_ws_values(settings.google_service_account_json, sheet_id, "__cache_tracks", st.session_state["refresh_key"])
+    rows = cached_ws_values(
+        settings.google_service_account_json, sheet_id, "__cache_tracks", st.session_state["refresh_key"]
+    )
     df = df_from_ws_rows(rows)
     if df.empty:
         return pd.DataFrame(
@@ -372,15 +376,21 @@ def load_cache_tracks_df(settings, sheet_id: str) -> pd.DataFrame:
 
 
 def load_cache_artists_df(settings, sheet_id: str) -> pd.DataFrame:
-    rows = cached_ws_values(settings.google_service_account_json, sheet_id, "__cache_artists", st.session_state["refresh_key"])
+    rows = cached_ws_values(
+        settings.google_service_account_json, sheet_id, "__cache_artists", st.session_state["refresh_key"]
+    )
     df = df_from_ws_rows(rows)
     if df.empty:
-        return pd.DataFrame(columns=["artist_id", "artist_name", "artist_cover_url", "genres", "primary_genre", "fetched_at"])
+        return pd.DataFrame(
+            columns=["artist_id", "artist_name", "artist_cover_url", "genres", "primary_genre", "fetched_at"]
+        )
     return df
 
 
 def load_cache_albums_df(settings, sheet_id: str) -> pd.DataFrame:
-    rows = cached_ws_values(settings.google_service_account_json, sheet_id, "__cache_albums", st.session_state["refresh_key"])
+    rows = cached_ws_values(
+        settings.google_service_account_json, sheet_id, "__cache_albums", st.session_state["refresh_key"]
+    )
     df = df_from_ws_rows(rows)
     if df.empty:
         return pd.DataFrame(columns=["album_id", "album_name", "album_cover_url", "release_date", "fetched_at"])
@@ -542,7 +552,7 @@ candidate_sheet_id = extract_sheet_id(sheet_input)
 # "Load sheet" gating: we do not open Google Sheet on every rerun.
 col_a, col_b = st.columns([1.2, 3])
 with col_a:
-    load_clicked = st.button("📄 Load sheet", use_container_width=True)
+    load_clicked = st.button("📄 Load sheet", width="stretch")
 with col_b:
     st.markdown('<div class="small-muted">Click the button pls.</div>', unsafe_allow_html=True)
 
@@ -557,6 +567,7 @@ if load_clicked:
         st.session_state["render_dashboard"] = False
         st.session_state["refresh_key"] += 1
         st.session_state["registry_cache"] = {"ts": None, "registered": False, "enabled": False, "existing_sheet": None}
+        st.session_state["min_data_date"] = None
         try:
             st.cache_data.clear()
         except Exception:
@@ -635,7 +646,10 @@ with c3:
     )
 with c4:
     if spotify_user_id:
-        st.markdown(f'<span class="badge">Spotify user id</span> <span class="badge">{spotify_user_id}</span>', unsafe_allow_html=True)
+        st.markdown(
+            f'<span class="badge">Spotify user id</span> <span class="badge">{spotify_user_id}</span>',
+            unsafe_allow_html=True,
+        )
 
 # Registry status: cached for 60s if user checked
 reg = st.session_state.get("registry_cache") or {}
@@ -655,7 +669,7 @@ with c5:
         st.markdown('<span class="badge">Background sync</span> <span class="badge">unknown</span>', unsafe_allow_html=True)
 
 with c6:
-    check_registry = st.button("Check", use_container_width=True)
+    check_registry = st.button("Check", width="stretch")
 
 if check_registry:
     registry_ws = get_registry_ws_best_effort(sheets=sheets, settings=settings)
@@ -817,32 +831,18 @@ with st.sidebar:
     st.markdown("### Time range")
 
     presets = ["This year", "All time", "Last 7 days", "Last 30 days", "Last 90 days", "Custom"]
-    preset = st.selectbox(
-        "Quick range",
-        presets,
-        index=0,  # дефолт = текущий год
-    )
+    preset = st.selectbox("Quick range", presets, index=0)
 
     today_utc = datetime.now(timezone.utc).date()
     current_year = today_utc.year
 
-    # Пытаемся взять самую раннюю дату из данных (если df уже существует)
-    # Важно: played_at_utc должен быть datetime64[ns, UTC] или совместим
-    min_data_date = None
-    try:
-        if "df" in globals() and df is not None and len(df) > 0:
-            s = df["played_at_utc"]
-            # на всякий: приводим к datetime и забираем date()
-            min_data_date = df["played_at_utc"].min().date() if (df is not None and len(df) > 0) else None
-    except Exception:
-        min_data_date = None
+    min_data_date = st.session_state.get("min_data_date")  # may be None until we load df_log once
 
     if preset == "This year":
         default_from = datetime(current_year, 1, 1, tzinfo=timezone.utc).date()
         default_to = today_utc
 
     elif preset == "All time":
-        # если нет данных — fallback на текущий год
         default_from = min_data_date or datetime(current_year, 1, 1, tzinfo=timezone.utc).date()
         default_to = today_utc
 
@@ -884,6 +884,26 @@ if not st.session_state.get("render_dashboard"):
 # -----------------------------
 try:
     df_log = load_log_df_cached(settings, sheet_id)
+
+    # Store min date for "All time" preset (once we actually have data)
+    try:
+        if df_log is not None and len(df_log) > 0:
+            st.session_state["min_data_date"] = df_log["played_at_utc"].min().date()
+        else:
+            st.session_state["min_data_date"] = None
+    except Exception:
+        st.session_state["min_data_date"] = None
+
+    # Prepare full-history mapping for New vs Repeat (do NOT depend on selected range)
+    df_hist = df_log.rename(columns={"Spotify ID": "track_id"}).copy()
+    df_hist["track_id"] = df_hist["track_id"].astype(str)
+    df_hist = df_hist[df_hist["track_id"].str.len() > 0].copy()
+    first_play = (
+        df_hist.groupby("track_id", dropna=False)["played_at_utc"]
+        .min()
+        .reset_index(name="first_play_utc")
+    )
+
     df_ct = load_cache_tracks_df(settings, sheet_id)
     df_ca = load_cache_artists_df(settings, sheet_id)
     df_calb = load_cache_albums_df(settings, sheet_id)
@@ -975,8 +995,8 @@ st.divider()
 # -----------------------------
 # Tabs
 # -----------------------------
-tab_artists, tab_tracks, tab_albums, tab_monthly, tab_genres, tab_stats, tab_recent = st.tabs(
-    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Monthly avg", "Top 5 Genres", "Statistics", "Recent plays"]
+tab_artists, tab_tracks, tab_albums, tab_monthly, tab_genres, tab_fingerprint, tab_new_repeat = st.tabs(
+    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Monthly avg", "Top 5 Genres", "Listening fingerprint", "New vs Repeat"]
 )
 
 # ===== Top 5 Artists =====
@@ -1146,7 +1166,7 @@ with tab_monthly:
 
     points = base.mark_point(color=SPOTIFY_GREEN, size=70).encode(
         y="avg_tracks_per_active_day:Q",
-        tooltip=tooltip_main,  # чтобы на точках тоже было
+        tooltip=tooltip_main,
     )
 
     img_df = plays_m[plays_m["album_cover_url"].fillna("").astype(str).str.len() > 0].copy()
@@ -1166,7 +1186,7 @@ with tab_monthly:
         tooltip=tooltip_cover,
     )
 
-    st.altair_chart((line + points + covers).properties(height=500), use_container_width=True)
+    st.altair_chart((line + points + covers).properties(height=500), width="stretch")
 
 # ===== Top 5 Genres =====
 with tab_genres:
@@ -1191,54 +1211,161 @@ with tab_genres:
             .encode(
                 x=alt.X("plays:Q", title="Tracks"),
                 y=alt.Y("primary_genre:N", sort="-x", title=None),
-                tooltip=["primary_genre", "plays"],
+                tooltip=[
+                    alt.Tooltip("primary_genre:N", title="Genre"),
+                    alt.Tooltip("plays:Q", title="Plays", format=",d"),
+                ],
             )
             .properties(height=300)
         )
-        st.altair_chart(ch, use_container_width=True)
+        st.altair_chart(ch, width="stretch")
 
-# ===== Statistics =====
-with tab_stats:
-    unique_artists = df["Artist"].nunique()
-    unique_tracks = df["track_id"].nunique()
-    total_tracks = len(df)
-    total_minutes = int(round(df["minutes"].sum(), 0))
-    active_days_sel = df["played_at_utc"].dt.date.nunique()
+# ===== Listening fingerprint (day of week × hour heatmap) =====
+with tab_fingerprint:
+    st.markdown("### Listening fingerprint")
+    st.markdown('<div class="small-muted">Day of week × hour (your selected timezone)</div>', unsafe_allow_html=True)
 
-    fav_genre = ""
-    if "primary_genre" in df.columns:
-        gg = df["primary_genre"].fillna("").astype(str).str.strip()
-        gg = gg[gg.str.len() > 0]
-        if len(gg) > 0:
-            fav_genre = gg.value_counts().index[0]
+    metric = st.radio("Metric", ["Plays", "Minutes"], horizontal=True, index=0, key="fingerprint_metric")
 
-    st.markdown("### Statistics")
-    s1, s2, s3, s4, s5 = st.columns([1, 1, 1, 1, 1])
-    with s1:
-        kpi_card("Unique artists", str(unique_artists))
-    with s2:
-        kpi_card("Unique tracks", str(unique_tracks))
-    with s3:
-        kpi_card("Total tracks played", str(total_tracks))
-    with s4:
-        kpi_card("Total minutes listened", str(total_minutes))
-    with s5:
-        kpi_card("Active days", str(active_days_sel))
+    dff = df.copy()
+    dff["played_local"] = dff["played_at_utc"].dt.tz_convert(tz)
+    dff["hour"] = dff["played_local"].dt.hour.astype(int)
+    dff["dow"] = dff["played_local"].dt.day_name()
 
-    if fav_genre:
-        st.markdown(f"**Favorite genre:** `{fav_genre}`")
-    else:
-        st.markdown("**Favorite genre:** _(not enough genre data yet)_")
+    dow_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
-# ===== Recent plays =====
-with tab_recent:
-    st.markdown("### Recent plays")
-    show_n = st.slider("Rows", min_value=20, max_value=500, value=100, step=20)
-
-    recent = df.sort_values("played_at_utc", ascending=False).head(show_n).copy()
-    recent["Played (UTC)"] = recent["played_at_utc"].dt.strftime("%Y-%m-%d %H:%M")
-    recent = recent[["Played (UTC)", "Track", "Artist", "track_id", "URL", "album_name", "primary_genre"]].rename(
-        columns={"track_id": "Spotify ID"}
+    agg = (
+        dff.groupby(["dow", "hour"], dropna=False)
+        .agg(plays=("track_id", "count"), minutes=("minutes", "sum"))
+        .reset_index()
     )
 
-    st.dataframe(recent, use_container_width=True, hide_index=True)
+    if agg.empty:
+        st.info("Not enough data for the selected range.")
+    else:
+        value_col = "plays" if metric == "Plays" else "minutes"
+        value_title = "Plays" if metric == "Plays" else "Minutes"
+
+        tooltip_fp = [
+            alt.Tooltip("dow:N", title="Day"),
+            alt.Tooltip("hour:Q", title="Hour"),
+            alt.Tooltip(f"{value_col}:Q", title=value_title, format=".0f" if metric == "Plays" else ".1f"),
+        ]
+
+        color_scale = alt.Scale(range=[SPOTIFY_BG, SPOTIFY_GREEN])
+
+        ch = (
+            alt.Chart(agg)
+            .mark_rect(cornerRadius=4)
+            .encode(
+                x=alt.X("hour:O", title="Hour", axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("dow:N", title=None, sort=dow_order),
+                color=alt.Color(f"{value_col}:Q", title=value_title, scale=color_scale),
+                tooltip=tooltip_fp,
+            )
+            .properties(height=320, background=SPOTIFY_BG)
+            .configure_view(strokeOpacity=0)
+            .configure_axis(
+                labelColor=SPOTIFY_MUTED,
+                titleColor=SPOTIFY_MUTED,
+                gridColor=SPOTIFY_BORDER,
+                tickColor=SPOTIFY_BORDER,
+                domainColor=SPOTIFY_BORDER,
+            )
+            .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
+        )
+
+        st.altair_chart(ch, width="stretch")
+
+# ===== New vs Repeat =====
+with tab_new_repeat:
+    st.markdown("### New vs Repeat")
+    st.markdown(
+        '<div class="small-muted">New = first time a track appears in your whole log. Repeat = all other plays.</div>',
+        unsafe_allow_html=True,
+    )
+
+    col_a, col_b = st.columns([1, 1.4])
+    with col_a:
+        grain = st.selectbox("Granularity", ["Week", "Month"], index=0, key="new_repeat_grain")
+    with col_b:
+        mode = st.selectbox("Metric", ["Plays", "Minutes", "Unique tracks"], index=0, key="new_repeat_mode")
+
+    dnr = df[["track_id", "played_at_utc", "minutes"]].copy()
+    dnr = dnr.merge(first_play, on="track_id", how="left")
+
+    # Bucket in LOCAL time (naive for to_period)
+    played_local_naive = dnr["played_at_utc"].dt.tz_convert(tz).dt.tz_localize(None)
+    first_local_naive = dnr["first_play_utc"].dt.tz_convert(tz).dt.tz_localize(None)
+
+    if grain == "Month":
+        dnr["bucket"] = played_local_naive.dt.to_period("M").dt.to_timestamp()
+        dnr["first_bucket"] = first_local_naive.dt.to_period("M").dt.to_timestamp()
+    else:
+        # week starting Monday
+        dnr["bucket"] = played_local_naive.dt.to_period("W-MON").dt.start_time
+        dnr["first_bucket"] = first_local_naive.dt.to_period("W-MON").dt.start_time
+
+    dnr["is_new"] = dnr["bucket"] == dnr["first_bucket"]
+    dnr["type"] = dnr["is_new"].map({True: "New", False: "Repeat"})
+
+    if mode == "Plays":
+        agg = dnr.groupby(["bucket", "type"], dropna=False).size().reset_index(name="value")
+        y_title = "Plays"
+        fmt = ",d"
+
+    elif mode == "Minutes":
+        agg = dnr.groupby(["bucket", "type"], dropna=False).agg(value=("minutes", "sum")).reset_index()
+        y_title = "Minutes"
+        fmt = ".1f"
+
+    else:  # Unique tracks
+        uniq_all = dnr.groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_all")
+        uniq_new = dnr[dnr["is_new"]].groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_new")
+        agg_u = uniq_all.merge(uniq_new, on="bucket", how="left").fillna({"uniq_new": 0})
+        agg_u["uniq_repeat"] = (agg_u["uniq_all"] - agg_u["uniq_new"]).clip(lower=0)
+
+        agg = pd.concat(
+            [
+                agg_u[["bucket"]].assign(type="New", value=agg_u["uniq_new"]),
+                agg_u[["bucket"]].assign(type="Repeat", value=agg_u["uniq_repeat"]),
+            ],
+            ignore_index=True,
+        )
+
+        y_title = "Unique tracks"
+        fmt = ",d"
+
+    if agg.empty:
+        st.info("Not enough data for the selected range.")
+    else:
+        # spotify-ish stacked bars
+        color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
+        tooltip_nr = [
+            alt.Tooltip("bucket:T", title="Period"),
+            alt.Tooltip("type:N", title="Type"),
+            alt.Tooltip("value:Q", title=y_title, format=fmt),
+        ]
+
+        ch = (
+            alt.Chart(agg)
+            .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+            .encode(
+                x=alt.X("bucket:T", title=None),
+                y=alt.Y("value:Q", title=y_title, stack=True),
+                color=alt.Color("type:N", title=None, scale=color_scale),
+                tooltip=tooltip_nr,
+            )
+            .properties(height=360, background=SPOTIFY_BG)
+            .configure_view(strokeOpacity=0)
+            .configure_axis(
+                labelColor=SPOTIFY_MUTED,
+                titleColor=SPOTIFY_MUTED,
+                gridColor=SPOTIFY_BORDER,
+                tickColor=SPOTIFY_BORDER,
+                domainColor=SPOTIFY_BORDER,
+            )
+            .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
+        )
+
+        st.altair_chart(ch, width="stretch")
