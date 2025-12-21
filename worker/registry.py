@@ -69,9 +69,17 @@ def upsert_registry_user(ws: gspread.Worksheet, user_sheet_id: str, enabled: boo
         ws.update(f"B{target_row}", [["true" if enabled else "false"]])
         ws.update(f"D{target_row}", [[now]])
 
-def update_registry_status(ws: gspread.Worksheet, user_sheet_id: str, last_sync_at: str | None, last_error: str | None) -> None:
+def update_registry_status(
+    ws: gspread.Worksheet,
+    user_sheet_id: str,
+    last_sync_at: str | None,
+    last_error: str | None,
+) -> None:
     """
-    Updates columns E (last_sync_at) and F (last_error) for a user row.
+    Updates:
+      D (last_seen_at) always
+      E (last_sync_at) if provided
+      F (last_error) if provided
     """
     all_values = ws.get_all_values()
     target_row = None
@@ -81,6 +89,9 @@ def update_registry_status(ws: gspread.Worksheet, user_sheet_id: str, last_sync_
             break
     if target_row is None:
         return
+
+    now = _now_iso()
+    ws.update(f"D{target_row}", [[now]])
 
     if last_sync_at is not None:
         ws.update(f"E{target_row}", [[last_sync_at]])

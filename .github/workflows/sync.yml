@@ -37,3 +37,10 @@ jobs:
           CACHE_TTL_DAYS: "30"
         run: |
           python -m worker.sync --once
+
+concurrency:
+  group: spotify-logger-sync
+  cancel-in-progress: true
+
+permissions:
+  contents: read
