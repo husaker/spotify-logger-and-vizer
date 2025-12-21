@@ -600,7 +600,21 @@ if not spotify_connected:
         import secrets
 
         oauth_state = encode_oauth_state(sheet_id=sheet_id, nonce=secrets.token_urlsafe(10))
-        write_app_state_kv(ss, {"oauth_state": oauth_state})
+
+        # IMPORTANT: writing oauth_state can hit Google Sheets 429/5xx on Streamlit Cloud
+        try:
+            write_app_state_kv(ss, {"oauth_state": oauth_state})
+        except gspread.exceptions.APIError as e:
+            msg = str(e)
+            if "429" in msg or "Quota" in msg or "quota" in msg:
+                st.warning(
+                    "Google Sheets API rate limit / quota hit while saving oauth_state.\n\n"
+                    "Wait ~60 seconds, click **Refresh data**, then try **Connect Spotify** again."
+                )
+            else:
+                st.error("Failed to write oauth_state into __app_state (Google Sheets API error).")
+                st.write(msg)
+            st.stop()
 
         scopes = ["user-read-recently-played", "user-read-email", "user-read-private"]
         url = build_auth_url(
@@ -616,6 +630,7 @@ if not spotify_connected:
 
 else:
     st.success("Spotify is connected")
+
 
     col1, col2, col3, col4 = st.columns([1.4, 1.4, 1.3, 1.9])
 
