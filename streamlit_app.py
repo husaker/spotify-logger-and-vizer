@@ -838,12 +838,12 @@ with st.sidebar:
         min_data_date = None
 
     if preset == "This year":
-        default_from = date(current_year, 1, 1)
+        default_from = datetime(current_year, 1, 1, tzinfo=timezone.utc).date()
         default_to = today_utc
 
     elif preset == "All time":
         # если нет данных — fallback на текущий год
-        default_from = min_data_date or date(current_year, 1, 1)
+        default_from = min_data_date or datetime(current_year, 1, 1, tzinfo=timezone.utc).date()
         default_to = today_utc
 
     elif preset == "Last 7 days":
