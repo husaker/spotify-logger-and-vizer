@@ -1364,20 +1364,23 @@ with tab_new_repeat:
             agg_wide["Repeat"] = 0
 
         agg_wide["total"] = agg_wide["New"] + agg_wide["Repeat"]
-        agg_wide["new_share"] = agg_wide.apply(lambda r: (r["New"] / r["total"]) if r["total"] > 0 else 0.0, axis=1)
+        agg_wide["new_share"] = agg_wide.apply(
+            lambda r: (r["New"] / r["total"]) if r["total"] > 0 else 0.0,
+            axis=1,
+        )
 
-        # "Exploration score" = weighted by total plays
+        # Exploration score (weighted by plays) = total_new / total_plays
         total_all = float(agg_wide["total"].sum())
-        exploration_score = (float((agg_wide["New"]).sum()) / total_all) if total_all > 0 else 0.0
+        exploration_score = (float(agg_wide["New"].sum()) / total_all) if total_all > 0 else 0.0
 
         st.markdown(
             f"""
-<div class="spotify-card" style="margin-bottom:12px;">
-  <div class="kpi-label">Exploration score (New share, weighted by plays)</div>
-  <div class="kpi">{exploration_score*100:.1f}%</div>
-  <div class="small-muted">Higher = you spend more time discovering new tracks.</div>
-</div>
-""",
+    <div class="spotify-card" style="margin-bottom:12px;">
+      <div class="kpi-label">Exploration score (New share, weighted by plays)</div>
+      <div class="kpi">{exploration_score * 100:.1f}%</div>
+      <div class="small-muted">Higher = you spend more time discovering new tracks.</div>
+    </div>
+    """,
             unsafe_allow_html=True,
         )
 
@@ -1389,39 +1392,12 @@ with tab_new_repeat:
             value_name="value",
         )
 
-        # spotify-ish colors
         color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
 
-        base_cfg = (
-            alt.Chart(bars_df)
-            .properties(height=380, background=SPOTIFY_BG)
-            .configure_view(strokeOpacity=0)
-            .configure_axis(
-                labelColor=SPOTIFY_MUTED,
-                titleColor=SPOTIFY_MUTED,
-                gridColor=SPOTIFY_BORDER,
-                tickColor=SPOTIFY_BORDER,
-                domainColor=SPOTIFY_BORDER,
-            )
-            .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
-        )
-
-        bars = base_cfg.mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
-            x=alt.X("bucket:T", title=None),
-            y=alt.Y("value:Q", title="Plays", stack=True),
-            color=alt.Color("type:N", title=None, scale=color_scale),
-            tooltip=[
-                alt.Tooltip("bucket:T", title="Period"),
-                alt.Tooltip("type:N", title="Type"),
-                alt.Tooltip("value:Q", title="Plays", format=",d"),
-                alt.Tooltip("total:Q", title="Total plays", format=",d"),
-                alt.Tooltip("new_share:Q", title="New share", format=".1%"),
-            ],
-        )
-
+        # --- Top chart: New share line + points
         line_df = agg_wide[["bucket", "new_share", "New", "Repeat", "total"]].copy()
 
-        line = (
+        share_line = (
             alt.Chart(line_df)
             .mark_line(color=SPOTIFY_GREEN, strokeWidth=2.5)
             .encode(
@@ -1430,7 +1406,7 @@ with tab_new_repeat:
                     "new_share:Q",
                     title="New share",
                     scale=alt.Scale(domain=[0, 1]),
-                    axis=alt.Axis(orient="right", format="%"),
+                    axis=alt.Axis(format="%"),
                 ),
                 tooltip=[
                     alt.Tooltip("bucket:T", title="Period"),
@@ -1442,16 +1418,12 @@ with tab_new_repeat:
             )
         )
 
-        points = (
+        share_points = (
             alt.Chart(line_df)
             .mark_point(color=SPOTIFY_GREEN, size=75, filled=True)
             .encode(
                 x=alt.X("bucket:T", title=None),
-                y=alt.Y(
-                    "new_share:Q",
-                    scale=alt.Scale(domain=[0, 1]),
-                    axis=alt.Axis(orient="right", format="%"),
-                ),
+                y=alt.Y("new_share:Q", scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format="%")),
                 tooltip=[
                     alt.Tooltip("bucket:T", title="Period"),
                     alt.Tooltip("new_share:Q", title="New share", format=".1%"),
@@ -1459,7 +1431,42 @@ with tab_new_repeat:
             )
         )
 
-        combo = alt.layer(bars, line, points).resolve_scale(y="independent")
+        share_chart = (share_line + share_points).properties(height=150)
+
+        # --- Bottom chart: stacked bars (plays)
+        bars = (
+            alt.Chart(bars_df)
+            .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+            .encode(
+                x=alt.X("bucket:T", title=None),
+                y=alt.Y("value:Q", title="Plays", stack=True),
+                color=alt.Color("type:N", title=None, scale=color_scale),
+                tooltip=[
+                    alt.Tooltip("bucket:T", title="Period"),
+                    alt.Tooltip("type:N", title="Type"),
+                    alt.Tooltip("value:Q", title="Plays", format=",d"),
+                    alt.Tooltip("total:Q", title="Total plays", format=",d"),
+                    alt.Tooltip("new_share:Q", title="New share", format=".1%"),
+                ],
+            )
+            .properties(height=260)
+        )
+
+        # --- Combine vertically (super stable vs layer+independent y)
+        combo = (
+            alt.vconcat(share_chart, bars, spacing=6)
+            .resolve_scale(x="shared")
+            .configure_view(fill=SPOTIFY_BG, strokeOpacity=0)  # dark chart background
+            .configure_axis(
+                labelColor=SPOTIFY_MUTED,
+                titleColor=SPOTIFY_MUTED,
+                gridColor=SPOTIFY_BORDER,
+                tickColor=SPOTIFY_BORDER,
+                domainColor=SPOTIFY_BORDER,
+            )
+            .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
+        )
+
         st.altair_chart(combo, width="stretch")
 
     # -----------------------
