@@ -28,17 +28,51 @@ def _retry_after(e: APIError) -> float | None:
         return None
 
 
-def _sleep(attempt: int, base: float = 1.0, max_sleep: float = 30.0) -> None:
-    s = min(max_sleep, base * (2 ** (attempt - 1)))
-    s *= 1.0 + random.uniform(-0.25, 0.25)
-    time.sleep(max(0.0, s))
+def _is_retryable_api_error(code: int | None, e: APIError) -> bool:
+    # стандартные временные
+    if code in (429, 500, 502, 503, 504):
+        return True
+
+    # иногда status_code может быть None, но текст явно про quota/rate limit
+    msg = str(e).lower()
+    if "quota exceeded" in msg or "rate limit" in msg or "user-rate limit" in msg:
+        return True
+
+    return False
 
 
-def gcall(fn: Callable[[], T], *, attempts: int = 6) -> T:
+def _sleep_decorrelated_jitter(
+    attempt: int,
+    *,
+    prev_sleep: float,
+    base: float,
+    cap: float,
+) -> float:
     """
-    Retry only retryable Google API errors: 429/500/502/503/504 + transient exceptions.
+    Decorrelated jitter backoff:
+    sleep = min(cap, random(base, prev_sleep*3))
+    """
+    if attempt <= 1:
+        s = base
+    else:
+        s = min(cap, random.uniform(base, prev_sleep * 3.0))
+    time.sleep(max(0.0, s))
+    return s
+
+
+def gcall(fn: Callable[[], T], *, attempts: int = 8) -> T:
+    """
+    Retry for Google Sheets via gspread:
+      - APIError 429/5xx + quota/rate-limit text
+      - transient exceptions (network hiccups)
+    Uses:
+      - Retry-After if present
+      - decorrelated jitter backoff
+      - stronger backoff for 429 (minute-based read quota)
     """
     last: Exception | None = None
+
+    prev_sleep = 0.0
 
     for attempt in range(1, attempts + 1):
         try:
@@ -48,22 +82,44 @@ def gcall(fn: Callable[[], T], *, attempts: int = 6) -> T:
             last = e
             code = _status_code(e)
 
-            # non-retryable or last attempt
-            if attempt >= attempts or code not in (429, 500, 502, 503, 504):
+            if attempt >= attempts or not _is_retryable_api_error(code, e):
                 raise
 
             ra = _retry_after(e)
             if ra is not None and ra > 0:
-                time.sleep(min(ra, 60.0))
+                # Spotify/Sheets иногда дают Retry-After
+                sleep_s = min(ra, 90.0)
+                time.sleep(sleep_s)
+                prev_sleep = max(prev_sleep, sleep_s)
+                continue
+
+            # 429 на Sheets часто требует более длинных пауз
+            if code == 429:
+                base = 4.0
+                cap = 90.0
             else:
-                _sleep(attempt)
+                base = 1.0
+                cap = 30.0
+
+            prev_sleep = _sleep_decorrelated_jitter(
+                attempt,
+                prev_sleep=prev_sleep if prev_sleep > 0 else base,
+                base=base,
+                cap=cap,
+            )
 
         except Exception as e:
-            # e.g. network hiccup
             last = e
             if attempt >= attempts:
                 raise
-            _sleep(attempt)
+
+            # network hiccup: мягче, но тоже с jitter
+            prev_sleep = _sleep_decorrelated_jitter(
+                attempt,
+                prev_sleep=prev_sleep if prev_sleep > 0 else 1.0,
+                base=1.0,
+                cap=30.0,
+            )
 
     assert last is not None
     raise last

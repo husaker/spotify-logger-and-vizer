@@ -4,3 +4,4 @@ cryptography==43.0.3
 gspread==6.1.4
 google-auth==2.34.0
 urllib3
+streamlit

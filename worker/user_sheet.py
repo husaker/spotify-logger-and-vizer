@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import gspread
+from app.gspread_retry import gcall
 
 LOG_TAB = "log"
 APP_STATE_TAB = "__app_state"
@@ -100,13 +101,19 @@ def ensure_ws_with_headers_versioned(
 
 
 def ensure_app_state_defaults(ws: gspread.Worksheet, timezone_name: str = "UTC") -> None:
+    """
+    __app_state is a 2-column key/value table.
+    Idempotent: never clears existing data, only upserts missing keys.
+    """
     ensure_headers_strict(ws, APP_STATE_HEADERS)
 
-    values = ws.get_all_values()
+    values = gcall(lambda: ws.get_all_values())
     existing: dict[str, str] = {}
     for r in values[1:]:
         if len(r) >= 2 and (r[0] or "").strip():
             existing[(r[0] or "").strip()] = (r[1] or "").strip()
+
+    now = _now_iso()
 
     defaults = {
         "enabled": "false",
@@ -114,15 +121,47 @@ def ensure_app_state_defaults(ws: gspread.Worksheet, timezone_name: str = "UTC")
         "last_synced_after_ts": "0",
         "spotify_user_id": "",
         "refresh_token_enc": "",
-        "created_at": existing.get("created_at") or _now_iso(),
-        "updated_at": _now_iso(),
+        "created_at": now,
+        "updated_at": now,
         "last_error": "",
     }
 
-    rows = [["key", "value"]] + [[k, v] for k, v in defaults.items()]
-    ws.clear()
-    ws.update("A1:B1", [APP_STATE_HEADERS])
-    ws.update(f"A2:B{len(rows)}", rows[1:])
+    # сохраняем существующие значения (не перетираем)
+    merged = dict(defaults)
+    merged.update({k: v for k, v in existing.items() if v != "" or k in existing})
+
+    # created_at: если уже был — не трогаем
+    if existing.get("created_at"):
+        merged["created_at"] = existing["created_at"]
+    # timezone: если уже был — не трогаем
+    if existing.get("timezone"):
+        merged["timezone"] = existing["timezone"]
+
+    # updated_at: всегда обновляем
+    merged["updated_at"] = now
+
+    # Теперь апдейтим построчно (key -> row). Без clear.
+    # Соберём карту key->row
+    key_to_row: dict[str, int] = {}
+    for i, r in enumerate(values[1:], start=2):
+        if len(r) >= 1 and (r[0] or "").strip():
+            key_to_row[(r[0] or "").strip()] = i
+
+    # upsert: обновим существующие + добавим недостающие
+    to_append: list[list[str]] = []
+    batch: list[dict[str, object]] = []
+
+    for k, v in merged.items():
+        if k in key_to_row:
+            row = key_to_row[k]
+            batch.append({"range": f"A{row}:B{row}", "values": [[k, v]]})
+        else:
+            to_append.append([k, v])
+
+    if batch:
+        gcall(lambda: ws.batch_update(batch, value_input_option="RAW"))
+    if to_append:
+        gcall(lambda: ws.append_rows(to_append, value_input_option="RAW"))
 
 
 def ensure_user_sheet_initialized(ss: gspread.Spreadsheet, timezone_name: str = "UTC") -> None:

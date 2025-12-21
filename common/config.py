@@ -60,6 +60,7 @@ class Settings:
     # Spotify
     spotify_client_id: str
     spotify_client_secret: str
+    public_app_url: str
 
     sync_lookback_minutes: int = 120
     dedup_read_rows: int = 5000
@@ -73,6 +74,7 @@ def load_settings() -> Settings:
 
     spotify_client_id = _get_env_required("SPOTIFY_CLIENT_ID")
     spotify_client_secret = _get_env_required("SPOTIFY_CLIENT_SECRET")
+    public_app_url = _get_env_required("PUBLIC_APP_URL").rstrip("/")
 
     return Settings(
         registry_sheet_id=registry_sheet_id,
@@ -80,6 +82,7 @@ def load_settings() -> Settings:
         fernet_key=fernet_key,
         spotify_client_id=spotify_client_id,
         spotify_client_secret=spotify_client_secret,
+        public_app_url=public_app_url,
         sync_lookback_minutes=_get_int("SYNC_LOOKBACK_MINUTES", 120),
         dedup_read_rows=_get_int("DEDUP_READ_ROWS", 5000),
         cache_ttl_days=_get_int("CACHE_TTL_DAYS", 30),
