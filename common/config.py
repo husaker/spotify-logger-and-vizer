@@ -57,10 +57,9 @@ class Settings:
     google_service_account_json: str
     fernet_key: str
 
-    # Spotify
     spotify_client_id: str
     spotify_client_secret: str
-    public_app_url: str
+    public_app_url: str  # <- оставим str, но может быть пустым
 
     sync_lookback_minutes: int = 120
     dedup_read_rows: int = 5000
@@ -74,7 +73,9 @@ def load_settings() -> Settings:
 
     spotify_client_id = _get_env_required("SPOTIFY_CLIENT_ID")
     spotify_client_secret = _get_env_required("SPOTIFY_CLIENT_SECRET")
-    public_app_url = _get_env_required("PUBLIC_APP_URL").rstrip("/")
+
+    # ✅ было required — стало optional + дефолт для локалки
+    public_app_url = (_get_env_optional("PUBLIC_APP_URL")).rstrip("/")
 
     return Settings(
         registry_sheet_id=registry_sheet_id,
