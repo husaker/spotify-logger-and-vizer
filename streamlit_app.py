@@ -1345,17 +1345,172 @@ with tab_new_repeat:
     dnr["is_new"] = dnr["bucket"] == dnr["first_bucket"]
     dnr["type"] = dnr["is_new"].map({True: "New", False: "Repeat"})
 
+    # -----------------------
+    # 1) PLAYS: stacked bars + New share line (%)
+    # -----------------------
     if mode == "Plays":
-        agg = dnr.groupby(["bucket", "type"], dropna=False).size().reset_index(name="value")
-        y_title = "Plays"
-        fmt = ",d"
+        agg_wide = (
+            dnr.groupby(["bucket", "type"], dropna=False)
+            .size()
+            .reset_index(name="plays")
+            .pivot_table(index="bucket", columns="type", values="plays", fill_value=0)
+            .reset_index()
+        )
 
+        # Ensure both columns exist
+        if "New" not in agg_wide.columns:
+            agg_wide["New"] = 0
+        if "Repeat" not in agg_wide.columns:
+            agg_wide["Repeat"] = 0
+
+        agg_wide["total"] = agg_wide["New"] + agg_wide["Repeat"]
+        agg_wide["new_share"] = agg_wide.apply(lambda r: (r["New"] / r["total"]) if r["total"] > 0 else 0.0, axis=1)
+
+        # "Exploration score" = weighted by total plays
+        total_all = float(agg_wide["total"].sum())
+        exploration_score = (float((agg_wide["New"]).sum()) / total_all) if total_all > 0 else 0.0
+
+        st.markdown(
+            f"""
+<div class="spotify-card" style="margin-bottom:12px;">
+  <div class="kpi-label">Exploration score (New share, weighted by plays)</div>
+  <div class="kpi">{exploration_score*100:.1f}%</div>
+  <div class="small-muted">Higher = you spend more time discovering new tracks.</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        # long for stacked bars
+        bars_df = agg_wide.melt(
+            id_vars=["bucket", "total", "new_share"],
+            value_vars=["New", "Repeat"],
+            var_name="type",
+            value_name="value",
+        )
+
+        # spotify-ish colors
+        color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
+
+        base_cfg = (
+            alt.Chart(bars_df)
+            .properties(height=380, background=SPOTIFY_BG)
+            .configure_view(strokeOpacity=0)
+            .configure_axis(
+                labelColor=SPOTIFY_MUTED,
+                titleColor=SPOTIFY_MUTED,
+                gridColor=SPOTIFY_BORDER,
+                tickColor=SPOTIFY_BORDER,
+                domainColor=SPOTIFY_BORDER,
+            )
+            .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
+        )
+
+        bars = base_cfg.mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+            x=alt.X("bucket:T", title=None),
+            y=alt.Y("value:Q", title="Plays", stack=True),
+            color=alt.Color("type:N", title=None, scale=color_scale),
+            tooltip=[
+                alt.Tooltip("bucket:T", title="Period"),
+                alt.Tooltip("type:N", title="Type"),
+                alt.Tooltip("value:Q", title="Plays", format=",d"),
+                alt.Tooltip("total:Q", title="Total plays", format=",d"),
+                alt.Tooltip("new_share:Q", title="New share", format=".1%"),
+            ],
+        )
+
+        line_df = agg_wide[["bucket", "new_share", "New", "Repeat", "total"]].copy()
+
+        line = (
+            alt.Chart(line_df)
+            .mark_line(color=SPOTIFY_GREEN, strokeWidth=2.5)
+            .encode(
+                x=alt.X("bucket:T", title=None),
+                y=alt.Y(
+                    "new_share:Q",
+                    title="New share",
+                    scale=alt.Scale(domain=[0, 1]),
+                    axis=alt.Axis(orient="right", format="%"),
+                ),
+                tooltip=[
+                    alt.Tooltip("bucket:T", title="Period"),
+                    alt.Tooltip("new_share:Q", title="New share", format=".1%"),
+                    alt.Tooltip("New:Q", title="New plays", format=",d"),
+                    alt.Tooltip("Repeat:Q", title="Repeat plays", format=",d"),
+                    alt.Tooltip("total:Q", title="Total plays", format=",d"),
+                ],
+            )
+        )
+
+        points = (
+            alt.Chart(line_df)
+            .mark_point(color=SPOTIFY_GREEN, size=75, filled=True)
+            .encode(
+                x=alt.X("bucket:T", title=None),
+                y=alt.Y(
+                    "new_share:Q",
+                    scale=alt.Scale(domain=[0, 1]),
+                    axis=alt.Axis(orient="right", format="%"),
+                ),
+                tooltip=[
+                    alt.Tooltip("bucket:T", title="Period"),
+                    alt.Tooltip("new_share:Q", title="New share", format=".1%"),
+                ],
+            )
+        )
+
+        combo = alt.layer(bars, line, points).resolve_scale(y="independent")
+        st.altair_chart(combo, width="stretch")
+
+    # -----------------------
+    # 2) MINUTES: keep stacked (as before)
+    # -----------------------
     elif mode == "Minutes":
-        agg = dnr.groupby(["bucket", "type"], dropna=False).agg(value=("minutes", "sum")).reset_index()
+        agg = (
+            dnr.groupby(["bucket", "type"], dropna=False)
+            .agg(value=("minutes", "sum"))
+            .reset_index()
+        )
         y_title = "Minutes"
         fmt = ".1f"
 
-    else:  # Unique tracks
+        if agg.empty:
+            st.info("Not enough data for the selected range.")
+        else:
+            color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
+            tooltip_nr = [
+                alt.Tooltip("bucket:T", title="Period"),
+                alt.Tooltip("type:N", title="Type"),
+                alt.Tooltip("value:Q", title=y_title, format=fmt),
+            ]
+
+            ch = (
+                alt.Chart(agg)
+                .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                .encode(
+                    x=alt.X("bucket:T", title=None),
+                    y=alt.Y("value:Q", title=y_title, stack=True),
+                    color=alt.Color("type:N", title=None, scale=color_scale),
+                    tooltip=tooltip_nr,
+                )
+                .properties(height=360, background=SPOTIFY_BG)
+                .configure_view(strokeOpacity=0)
+                .configure_axis(
+                    labelColor=SPOTIFY_MUTED,
+                    titleColor=SPOTIFY_MUTED,
+                    gridColor=SPOTIFY_BORDER,
+                    tickColor=SPOTIFY_BORDER,
+                    domainColor=SPOTIFY_BORDER,
+                )
+                .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
+            )
+
+            st.altair_chart(ch, width="stretch")
+
+    # -----------------------
+    # 3) UNIQUE TRACKS: keep stacked (as before)
+    # -----------------------
+    else:
         uniq_all = dnr.groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_all")
         uniq_new = dnr[dnr["is_new"]].groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_new")
         agg_u = uniq_all.merge(uniq_new, on="bucket", how="left").fillna({"uniq_new": 0})
@@ -1372,36 +1527,35 @@ with tab_new_repeat:
         y_title = "Unique tracks"
         fmt = ",d"
 
-    if agg.empty:
-        st.info("Not enough data for the selected range.")
-    else:
-        # spotify-ish stacked bars
-        color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
-        tooltip_nr = [
-            alt.Tooltip("bucket:T", title="Period"),
-            alt.Tooltip("type:N", title="Type"),
-            alt.Tooltip("value:Q", title=y_title, format=fmt),
-        ]
+        if agg.empty:
+            st.info("Not enough data for the selected range.")
+        else:
+            color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
+            tooltip_nr = [
+                alt.Tooltip("bucket:T", title="Period"),
+                alt.Tooltip("type:N", title="Type"),
+                alt.Tooltip("value:Q", title=y_title, format=fmt),
+            ]
 
-        ch = (
-            alt.Chart(agg)
-            .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
-            .encode(
-                x=alt.X("bucket:T", title=None),
-                y=alt.Y("value:Q", title=y_title, stack=True),
-                color=alt.Color("type:N", title=None, scale=color_scale),
-                tooltip=tooltip_nr,
+            ch = (
+                alt.Chart(agg)
+                .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                .encode(
+                    x=alt.X("bucket:T", title=None),
+                    y=alt.Y("value:Q", title=y_title, stack=True),
+                    color=alt.Color("type:N", title=None, scale=color_scale),
+                    tooltip=tooltip_nr,
+                )
+                .properties(height=360, background=SPOTIFY_BG)
+                .configure_view(strokeOpacity=0)
+                .configure_axis(
+                    labelColor=SPOTIFY_MUTED,
+                    titleColor=SPOTIFY_MUTED,
+                    gridColor=SPOTIFY_BORDER,
+                    tickColor=SPOTIFY_BORDER,
+                    domainColor=SPOTIFY_BORDER,
+                )
+                .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
             )
-            .properties(height=360, background=SPOTIFY_BG)
-            .configure_view(strokeOpacity=0)
-            .configure_axis(
-                labelColor=SPOTIFY_MUTED,
-                titleColor=SPOTIFY_MUTED,
-                gridColor=SPOTIFY_BORDER,
-                tickColor=SPOTIFY_BORDER,
-                domainColor=SPOTIFY_BORDER,
-            )
-            .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
-        )
 
-        st.altair_chart(ch, width="stretch")
+            st.altair_chart(ch, width="stretch")
