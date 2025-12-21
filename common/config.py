@@ -57,6 +57,10 @@ class Settings:
     google_service_account_json: str
     fernet_key: str
 
+    # Spotify
+    spotify_client_id: str
+    spotify_client_secret: str
+
     sync_lookback_minutes: int = 120
     dedup_read_rows: int = 5000
     cache_ttl_days: int = 30
@@ -67,10 +71,15 @@ def load_settings() -> Settings:
     google_service_account_json = _load_service_account_json()
     fernet_key = _get_env_required("FERNET_KEY")
 
+    spotify_client_id = _get_env_required("SPOTIFY_CLIENT_ID")
+    spotify_client_secret = _get_env_required("SPOTIFY_CLIENT_SECRET")
+
     return Settings(
         registry_sheet_id=registry_sheet_id,
         google_service_account_json=google_service_account_json,
         fernet_key=fernet_key,
+        spotify_client_id=spotify_client_id,
+        spotify_client_secret=spotify_client_secret,
         sync_lookback_minutes=_get_int("SYNC_LOOKBACK_MINUTES", 120),
         dedup_read_rows=_get_int("DEDUP_READ_ROWS", 5000),
         cache_ttl_days=_get_int("CACHE_TTL_DAYS", 30),
