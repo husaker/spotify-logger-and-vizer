@@ -74,6 +74,7 @@ def main() -> None:
                 fernet_key=settings.fernet_key,
                 spotify_client_id=settings.spotify_client_id,
                 spotify_client_secret=settings.spotify_client_secret,
+                cache_ttl_days=settings.cache_ttl_days,
             )
             total_added += added
             now = datetime.now(timezone.utc).isoformat()
