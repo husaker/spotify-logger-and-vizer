@@ -1221,14 +1221,52 @@ with tab_genres:
         st.altair_chart(ch, width="stretch")
 
 # ===== Listening fingerprint (day of week × hour heatmap) =====
+# ===== Listening fingerprint (day of week × hour heatmap) =====
 with tab_fingerprint:
     st.markdown("### Listening fingerprint")
-    st.markdown('<div class="small-muted">Day of week × hour (your selected timezone)</div>', unsafe_allow_html=True)
 
-    metric = st.radio("Metric", ["Plays", "Minutes"], horizontal=True, index=0, key="fingerprint_metric")
+    # --- Timezone presets for this chart (doesn't change app_state timezone)
+    tz_presets = {
+        "Use sheet timezone": None,                 # то, что уже в app_state (timezone_name)
+        "London (Europe/London)": "Europe/London",
+        "Belgrade (Europe/Belgrade)": "Europe/Belgrade",
+        "Moscow (Europe/Moscow)": "Europe/Moscow",
+        "Europe/Amsterdam",
+        "UTC": "UTC",
+        # если хочешь “обычный” UTC+1/UTC+2 по сезону — можно вместо fixed добавить:
+        # "Central Europe (Europe/Amsterdam)": "Europe/Amsterdam",
+    }
+
+    # дефолт: "Use sheet timezone"
+    tz_label = st.selectbox(
+        "Timezone preset",
+        list(tz_presets.keys()),
+        index=0,
+        key="fingerprint_tz_preset",
+    )
+
+    # resolve timezone used in fingerprint
+    tz_override = tz_presets[tz_label]
+    try:
+        tz_fp = ZoneInfo(tz_override) if tz_override else tz  # tz уже посчитан выше по timezone_name
+    except Exception:
+        tz_fp = tz  # fallback
+
+    st.markdown(
+        f'<div class="small-muted">Day of week × hour ({tz_fp.key})</div>',
+        unsafe_allow_html=True,
+    )
+
+    metric = st.radio(
+        "Metric",
+        ["Plays", "Minutes"],
+        horizontal=True,
+        index=0,
+        key="fingerprint_metric",
+    )
 
     dff = df.copy()
-    dff["played_local"] = dff["played_at_utc"].dt.tz_convert(tz)
+    dff["played_local"] = dff["played_at_utc"].dt.tz_convert(tz_fp)
     dff["hour"] = dff["played_local"].dt.hour.astype(int)
     dff["dow"] = dff["played_local"].dt.day_name()
 
