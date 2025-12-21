@@ -949,7 +949,7 @@ st.divider()
 # Tabs
 # -----------------------------
 tab_artists, tab_tracks, tab_albums, tab_monthly, tab_genres, tab_stats, tab_recent = st.tabs(
-    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Monthly avg plays", "Top 5 Genres", "Statistics", "Recent plays"]
+    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Monthly avg", "Top 5 Genres", "Statistics", "Recent plays"]
 )
 
 # ===== Top 5 Artists =====
@@ -1052,7 +1052,7 @@ with tab_albums:
 
 # ===== Monthly avg (avg per active day) + cover markers on the line =====
 with tab_monthly:
-    st.markdown("### Average plays per active day by month")
+    st.markdown("### Average per active day by month")
 
     dfm = df.copy()
     dfm["month"] = dfm["played_at_utc"].dt.to_period("M").dt.to_timestamp()
@@ -1119,7 +1119,7 @@ with tab_monthly:
         x="month_str:N",
         y="avg_tracks_per_active_day:Q",
         url="album_cover_url:N",
-        tooltip=["month", "top album of the month", "avg_tracks_per_active_day", "plays", "active_days"],
+        tooltip=["month_str", "album_name", "avg_tracks_per_active_day", "plays", "active_days"],
     )
 
     st.altair_chart((line + points + covers).properties(height=280), use_container_width=True)
