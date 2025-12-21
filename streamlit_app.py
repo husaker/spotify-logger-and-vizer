@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from datetime import datetime, timedelta, timezone, time
@@ -9,6 +10,7 @@ import altair as alt
 import gspread
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from dateutil import parser as dtparser
 from zoneinfo import ZoneInfo
 
@@ -38,7 +40,7 @@ SPOTIFY_TEXT = "#FFFFFF"
 SPOTIFY_MUTED = "#B3B3B3"
 SPOTIFY_BORDER = "#2A2A2A"
 
-# Size on Top 5 tabs
+# Cover size on Top 5 tabs
 COVER_W = 150
 
 st.markdown(
@@ -127,11 +129,6 @@ def extract_sheet_id(text: str) -> str | None:
     return None
 
 
-def make_state() -> str:
-    import secrets
-    return secrets.token_urlsafe(16)
-
-
 def get_query_param(name: str) -> str | None:
     # Streamlit new API + fallback
     try:
@@ -145,11 +142,58 @@ def get_query_param(name: str) -> str | None:
         return arr[0] if arr else None
 
 
+def set_query_params(**kwargs: str) -> None:
+    # Streamlit new API + fallback
+    try:
+        st.query_params.clear()
+        for k, v in kwargs.items():
+            st.query_params[k] = v
+    except Exception:
+        st.experimental_set_query_params(**kwargs)
+
+
 def clear_query_params() -> None:
     try:
         st.query_params.clear()
     except Exception:
         st.experimental_set_query_params()
+
+
+def redirect_same_tab(url: str) -> None:
+    # Redirect within the same browser tab
+    components.html(
+        f"""
+        <script>
+          window.location.href = {url!r};
+        </script>
+        """,
+        height=0,
+    )
+
+
+def encode_oauth_state(*, sheet_id: str, nonce: str) -> str:
+    payload = {"sid": sheet_id, "n": nonce}
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
+
+
+def decode_oauth_state(state: str) -> dict[str, str] | None:
+    try:
+        s = (state or "").strip()
+        if not s:
+            return None
+        pad = "=" * (-len(s) % 4)
+        raw = base64.urlsafe_b64decode((s + pad).encode("utf-8"))
+        obj = json.loads(raw.decode("utf-8"))
+        if not isinstance(obj, dict):
+            return None
+        sid = str(obj.get("sid") or "").strip()
+        nonce = str(obj.get("n") or "").strip()
+        if not sid or not nonce:
+            return None
+        return {"sid": sid, "nonce": nonce}
+    except Exception:
+        return None
 
 
 def parse_played_at_to_utc(date_str: str) -> datetime | None:
@@ -343,7 +387,7 @@ settings = load_settings()
 sheets = SheetsClient.from_service_account_json(settings.google_service_account_json)
 service_email = get_service_account_email(settings)
 
-# NOTE: default is collapsed now (expanded=False)
+# Default is collapsed (expanded=False)
 with st.expander("How to prepare Google Sheet", expanded=False):
     st.write("1) Create a Google Sheet (or use an existing one).")
     if service_email:
@@ -358,19 +402,24 @@ with st.expander("How to prepare Google Sheet", expanded=False):
 st.divider()
 
 # -----------------------------
-# Sheet input
+# Sheet input (supports ?sheet=... auto-fill)
 # -----------------------------
+sheet_from_qp = get_query_param("sheet")
+if sheet_from_qp and "sheet_input" not in st.session_state:
+    st.session_state["sheet_input"] = sheet_from_qp
+
 sheet_input = st.text_input(
     "Paste your Google Sheet URL or Sheet ID",
+    key="sheet_input",
     placeholder="https://docs.google.com/spreadsheets/d/<ID>/edit ...",
 )
+
 sheet_id = extract_sheet_id(sheet_input)
+
 # Reset dashboard render when user switches to another sheet
 if sheet_id and st.session_state.get("last_sheet_id") and sheet_id != st.session_state["last_sheet_id"]:
     st.session_state["render_dashboard"] = False
     st.session_state["refresh_key"] += 1
-
-    # Optional: clear Streamlit cache to avoid stale reads across sheets
     try:
         st.cache_data.clear()
     except Exception:
@@ -400,10 +449,10 @@ except Exception as e:
     st.write("Reason:", str(e))
     st.stop()
 
-st.success("Sheet structure OK (log, etc)")
+st.success("Sheet structure OK (log, caches, app_state)")
 
 # -----------------------------
-# OAuth callback handling
+# OAuth callback handling (state carries sheet_id; auto-sets ?sheet=...)
 # -----------------------------
 redirect_uri = settings.public_app_url.rstrip("/")
 
@@ -417,7 +466,25 @@ if error_cb:
     st.stop()
 
 if code and state_cb:
-    sheet_state = read_app_state(ss)
+    decoded = decode_oauth_state(state_cb)
+    if not decoded:
+        st.error("Invalid OAuth state. Click Connect Spotify again.")
+        clear_query_params()
+        st.stop()
+
+    sid_from_state = decoded["sid"]
+
+    # Always open the sheet referenced by OAuth state (works even if callback happens in a new tab)
+    try:
+        ss_cb = sheets.open_by_key(sid_from_state)
+        ensure_user_sheet_initialized(ss_cb, timezone_name="UTC")
+    except Exception as e:
+        st.error("OAuth callback: cannot open/initialize the sheet from state.")
+        st.write("Reason:", str(e))
+        clear_query_params()
+        st.stop()
+
+    sheet_state = read_app_state(ss_cb)
     expected = (sheet_state.get("oauth_state") or "").strip()
 
     if not expected or expected != state_cb:
@@ -442,7 +509,7 @@ if code and state_cb:
         refresh_enc = encrypt_str(tokens.refresh_token, settings.fernet_key)
 
         write_app_state_kv(
-            ss,
+            ss_cb,
             {
                 "spotify_user_id": spotify_user_id_cb,
                 "refresh_token_enc": refresh_enc,
@@ -451,8 +518,11 @@ if code and state_cb:
             },
         )
 
-    st.success("Spotify connected! Now click Enable background sync.")
+    # Land back on the main UI with the correct sheet pre-filled
     clear_query_params()
+    set_query_params(sheet=sid_from_state)
+
+    st.success("Spotify connected! Returning to your sheet…")
     st.rerun()
 
 # -----------------------------
@@ -486,7 +556,8 @@ c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.7, 1.5])
 with c1:
     st.markdown(
         f'<span class="badge">Local enabled</span> <span class="success-pill">true</span>'
-        if enabled_local else f'<span class="badge">Local enabled</span> <span class="badge">false</span>',
+        if enabled_local
+        else f'<span class="badge">Local enabled</span> <span class="badge">false</span>',
         unsafe_allow_html=True,
     )
 with c2:
@@ -494,7 +565,8 @@ with c2:
 with c3:
     st.markdown(
         f'<span class="badge">Spotify</span> <span class="success-pill">connected</span>'
-        if spotify_connected else f'<span class="badge">Spotify</span> <span class="badge">not connected</span>',
+        if spotify_connected
+        else f'<span class="badge">Spotify</span> <span class="badge">not connected</span>',
         unsafe_allow_html=True,
     )
 with c4:
@@ -503,7 +575,8 @@ with c4:
 with c5:
     st.markdown(
         f'<span class="badge">Background sync</span> <span class="success-pill">ON</span>'
-        if background_sync_on else f'<span class="badge">Background sync</span> <span class="badge">OFF</span>',
+        if background_sync_on
+        else f'<span class="badge">Background sync</span> <span class="badge">OFF</span>',
         unsafe_allow_html=True,
     )
 
@@ -523,7 +596,10 @@ if not spotify_connected:
     st.warning("Spotify is not connected yet. Connect via OAuth.")
 
     if st.button("Connect Spotify"):
-        oauth_state = make_state()
+        # Build state that carries sheet_id + nonce (so callback can always find the right sheet)
+        import secrets
+
+        oauth_state = encode_oauth_state(sheet_id=sheet_id, nonce=secrets.token_urlsafe(10))
         write_app_state_kv(ss, {"oauth_state": oauth_state})
 
         scopes = ["user-read-recently-played", "user-read-email", "user-read-private"]
@@ -534,8 +610,9 @@ if not spotify_connected:
             state=oauth_state,
         )
 
-        st.link_button("Open Spotify auth", url)
-        st.caption(f"Redirect URI used: `{redirect_uri}` (must be added in Spotify Dashboard)")
+        # Same-tab redirect (best UX; no "two tabs" issue)
+        redirect_same_tab(url)
+        st.stop()
 
 else:
     st.success("Spotify is connected")
@@ -668,7 +745,6 @@ with st.sidebar:
     if isinstance(picked, tuple) and len(picked) == 2:
         date_from, date_to = picked
     else:
-        # Fallback if Streamlit returns a single date
         date_from = picked
         date_to = picked
 
@@ -988,17 +1064,17 @@ with tab_genres:
             .head(5)
         )
 
-        ch = (
-            alt.Chart(g)
-            .mark_bar(color=SPOTIFY_GREEN)
-            .encode(
-                x=alt.X("plays:Q", title="Tracks"),
-                y=alt.Y("primary_genre:N", sort="-x", title=None),
-                tooltip=["primary_genre", "plays"],
-            )
-            .properties(height=300)
+    ch = (
+        alt.Chart(g)
+        .mark_bar(color=SPOTIFY_GREEN)
+        .encode(
+            x=alt.X("plays:Q", title="Tracks"),
+            y=alt.Y("primary_genre:N", sort="-x", title=None),
+            tooltip=["primary_genre", "plays"],
         )
-        st.altair_chart(ch, use_container_width=True)
+        .properties(height=300)
+    )
+    st.altair_chart(ch, use_container_width=True)
 
 # ===== Statistics =====
 with tab_stats:
