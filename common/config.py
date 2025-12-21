@@ -75,7 +75,7 @@ def load_settings() -> Settings:
     spotify_client_secret = _get_env_required("SPOTIFY_CLIENT_SECRET")
 
     # ✅ было required — стало optional + дефолт для локалки
-    public_app_url = (_get_env_optional("PUBLIC_APP_URL")).rstrip("/")
+    public_app_url = (_get_env_optional("PUBLIC_APP_URL") or "").rstrip("/")
 
     return Settings(
         registry_sheet_id=registry_sheet_id,
