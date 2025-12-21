@@ -13,6 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dateutil import parser as dtparser
 from zoneinfo import ZoneInfo
+import json as _json
 
 from app.crypto import encrypt_str
 from app.gspread_retry import gcall
@@ -160,14 +161,25 @@ def clear_query_params() -> None:
 
 
 def redirect_same_tab(url: str) -> None:
-    # Redirect within the same browser tab
+    # Runs inside an iframe; use window.top to navigate the main tab
+    safe = _json.dumps(url)  # proper JS string escaping
     components.html(
         f"""
         <script>
-          window.location.href = {url!r};
+          const url = {safe};
+          try {{
+            window.top.location.href = url;
+          }} catch (e) {{
+            try {{
+              window.parent.location.href = url;
+            }} catch (e2) {{
+              window.location.href = url;
+            }}
+          }}
         </script>
         """,
         height=0,
+        width=0,
     )
 
 
@@ -595,24 +607,32 @@ st.markdown("## Actions")
 if not spotify_connected:
     st.warning("Spotify is not connected yet. Connect via OAuth.")
 
+    # If we already generated an auth url on previous run — redirect now
+    if st.session_state.get("pending_auth_url"):
+        url = st.session_state.pop("pending_auth_url")
+        redirect_same_tab(url)
+
+        # Fallback if browser blocks JS navigation
+        st.link_button("If you are not redirected, click here", url)
+        st.stop()
+
     if st.button("Connect Spotify"):
-        # Build state that carries sheet_id + nonce (so callback can always find the right sheet)
         import secrets
 
         oauth_state = encode_oauth_state(sheet_id=sheet_id, nonce=secrets.token_urlsafe(10))
 
-        # IMPORTANT: writing oauth_state can hit Google Sheets 429/5xx on Streamlit Cloud
+        # Save oauth_state to __app_state (can hit 429 sometimes)
         try:
             write_app_state_kv(ss, {"oauth_state": oauth_state})
         except gspread.exceptions.APIError as e:
             msg = str(e)
             if "429" in msg or "Quota" in msg or "quota" in msg:
                 st.warning(
-                    "Google Sheets API rate limit / quota hit while saving oauth_state.\n\n"
+                    "Google Sheets API rate limit hit while saving oauth_state.\n\n"
                     "Wait ~60 seconds, click **Refresh data**, then try **Connect Spotify** again."
                 )
             else:
-                st.error("Failed to write oauth_state into __app_state (Google Sheets API error).")
+                st.error("Failed to write oauth_state into __app_state.")
                 st.write(msg)
             st.stop()
 
@@ -624,9 +644,9 @@ if not spotify_connected:
             state=oauth_state,
         )
 
-        # Same-tab redirect (best UX; no "two tabs" issue)
-        redirect_same_tab(url)
-        st.stop()
+        # Store url, rerun, then redirect on the next run (more reliable in Streamlit Cloud)
+        st.session_state["pending_auth_url"] = url
+        st.rerun()
 
 else:
     st.success("Spotify is connected")
