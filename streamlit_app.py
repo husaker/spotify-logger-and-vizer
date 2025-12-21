@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import re
 from datetime import datetime, timedelta, timezone, time
@@ -13,7 +15,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dateutil import parser as dtparser
 from zoneinfo import ZoneInfo
-import json as _json
 
 from app.crypto import encrypt_str
 from app.gspread_retry import gcall
@@ -112,8 +113,16 @@ if "refresh_key" not in st.session_state:
     st.session_state["refresh_key"] = 0
 if "render_dashboard" not in st.session_state:
     st.session_state["render_dashboard"] = False
-if "last_sheet_id" not in st.session_state:
-    st.session_state["last_sheet_id"] = None
+if "active_sheet_id" not in st.session_state:
+    st.session_state["active_sheet_id"] = None  # chosen & loaded sheet
+if "inited_sheet_id" not in st.session_state:
+    st.session_state["inited_sheet_id"] = None  # structure ensured for this sheet in this session
+if "pending_auth_url" not in st.session_state:
+    st.session_state["pending_auth_url"] = None
+if "registry_cache" not in st.session_state:
+    st.session_state["registry_cache"] = {"ts": None, "registered": False, "enabled": False, "existing_sheet": None}
+if "sheet_input" not in st.session_state:
+    st.session_state["sheet_input"] = ""
 
 # -----------------------------
 # Helpers
@@ -162,7 +171,7 @@ def clear_query_params() -> None:
 
 def redirect_same_tab(url: str) -> None:
     # Runs inside an iframe; use window.top to navigate the main tab
-    safe = _json.dumps(url)  # proper JS string escaping
+    safe = json.dumps(url)
     components.html(
         f"""
         <script>
@@ -183,27 +192,59 @@ def redirect_same_tab(url: str) -> None:
     )
 
 
-def encode_oauth_state(*, sheet_id: str, nonce: str) -> str:
-    payload = {"sid": sheet_id, "n": nonce}
-    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
 
 
-def decode_oauth_state(state: str) -> dict[str, str] | None:
+def _b64url_decode(s: str) -> bytes:
+    s = (s or "").strip()
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode((s + pad).encode("utf-8"))
+
+
+def encode_oauth_state(*, sheet_id: str, now_utc: datetime, secret: str) -> str:
+    """
+    Signed OAuth state:
+      state = b64url(payload_json) + "." + b64url(hmac_sha256(payload_json))
+    No need to store oauth_state in Google Sheets.
+    """
+    payload = {
+        "sid": sheet_id,
+        "ts": int(now_utc.timestamp()),
+        "n": _b64url(hashlib.sha256(f"{sheet_id}:{now_utc.timestamp()}".encode("utf-8")).digest())[:18],
+    }
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    sig = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
+    return f"{_b64url(raw)}.{_b64url(sig)}"
+
+
+def decode_oauth_state(state: str, *, secret: str, max_age_seconds: int = 3600) -> dict[str, Any] | None:
     try:
         s = (state or "").strip()
-        if not s:
+        if not s or "." not in s:
             return None
-        pad = "=" * (-len(s) % 4)
-        raw = base64.urlsafe_b64decode((s + pad).encode("utf-8"))
+        p_b64, sig_b64 = s.split(".", 1)
+        raw = _b64url_decode(p_b64)
+        sig = _b64url_decode(sig_b64)
+
+        expected = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+
         obj = json.loads(raw.decode("utf-8"))
         if not isinstance(obj, dict):
             return None
+
         sid = str(obj.get("sid") or "").strip()
-        nonce = str(obj.get("n") or "").strip()
-        if not sid or not nonce:
+        ts = int(obj.get("ts") or 0)
+        if not sid or ts <= 0:
             return None
-        return {"sid": sid, "nonce": nonce}
+
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if abs(now_ts - ts) > max_age_seconds:
+            return None
+
+        return obj
     except Exception:
         return None
 
@@ -244,12 +285,9 @@ def get_service_account_email(settings) -> str | None:
 
 
 # -----------------------------
-# Registry helpers
+# Registry helpers (lazy usage only)
 # -----------------------------
 def get_registry_ws_best_effort(*, sheets: SheetsClient, settings) -> Any | None:
-    """
-    Returns registry worksheet or None if unavailable.
-    """
     try:
         registry_ss = sheets.open_by_key(settings.registry_sheet_id)
         registry_ws = sheets.get_or_create_worksheet(registry_ss, REGISTRY_TAB, rows=2000, cols=20)
@@ -260,9 +298,6 @@ def get_registry_ws_best_effort(*, sheets: SheetsClient, settings) -> Any | None
 
 
 def registry_get_sheet_status(registry_ws, user_sheet_id: str) -> tuple[bool, bool]:
-    """
-    Returns: (registered, enabled_in_registry)
-    """
     try:
         rows = gcall(lambda: registry_ws.get_all_values())
         for r in rows[1:]:
@@ -279,7 +314,7 @@ def registry_get_sheet_status(registry_ws, user_sheet_id: str) -> tuple[bool, bo
 # -----------------------------
 # Cached reads (reduce 429 on reruns)
 # -----------------------------
-@st.cache_data(ttl=45, show_spinner=False)
+@st.cache_data(ttl=90, show_spinner=False)
 def cached_ws_values(service_json: str, sheet_id: str, ws_title: str, refresh_key: int) -> list[list[str]]:
     sheets_local = SheetsClient.from_service_account_json(service_json)
     ss_local = sheets_local.open_by_key(sheet_id)
@@ -298,7 +333,7 @@ def df_from_ws_rows(rows: list[list[str]]) -> pd.DataFrame:
 def load_log_df_cached(settings, sheet_id: str) -> pd.DataFrame:
     rows = cached_ws_values(settings.google_service_account_json, sheet_id, "log", st.session_state["refresh_key"])
     if not rows or len(rows) < 2:
-        return pd.DataFrame(columns=["Date", "Track", "Artist", "Spotify ID", "URL"])
+        return pd.DataFrame(columns=["Date", "Tracknames", "Artist", "Spotify ID", "URL"])
 
     header = rows[0]
     data = rows[1:]
@@ -399,7 +434,6 @@ settings = load_settings()
 sheets = SheetsClient.from_service_account_json(settings.google_service_account_json)
 service_email = get_service_account_email(settings)
 
-# Default is collapsed (expanded=False)
 with st.expander("How to prepare Google Sheet", expanded=False):
     st.write("1) Create a Google Sheet (or use an existing one).")
     if service_email:
@@ -407,67 +441,16 @@ with st.expander("How to prepare Google Sheet", expanded=False):
         st.code(service_email)
     else:
         st.warning("Could not read client_email from service account JSON. Check GOOGLE_SERVICE_ACCOUNT_JSON.")
-    st.write("3) Paste the sheet link/ID below.")
+    st.write("3) Paste the sheet link/ID below, then click **Load sheet**.")
     st.write("4) Connect Spotify (OAuth).")
-    st.write("5) Click **Enable background sync** to allow the cron worker to write logs into your sheet.")
+    st.write("5) Enable background sync (optional).")
 
 st.divider()
 
 # -----------------------------
-# Sheet input (supports ?sheet=... auto-fill)
-# -----------------------------
-sheet_from_qp = get_query_param("sheet")
-if sheet_from_qp and "sheet_input" not in st.session_state:
-    st.session_state["sheet_input"] = sheet_from_qp
-
-sheet_input = st.text_input(
-    "Paste your Google Sheet URL or Sheet ID",
-    key="sheet_input",
-    placeholder="https://docs.google.com/spreadsheets/d/<ID>/edit ...",
-)
-
-sheet_id = extract_sheet_id(sheet_input)
-
-# Reset dashboard render when user switches to another sheet
-if sheet_id and st.session_state.get("last_sheet_id") and sheet_id != st.session_state["last_sheet_id"]:
-    st.session_state["render_dashboard"] = False
-    st.session_state["refresh_key"] += 1
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
-
-st.session_state["last_sheet_id"] = sheet_id
-
-if not sheet_id:
-    st.info("Paste a Google Sheet link/ID to continue.")
-    st.stop()
-
-# Open user sheet
-try:
-    ss = sheets.open_by_key(sheet_id)
-except Exception as e:
-    st.error("❌ Can't open this Google Sheet with the service account.")
-    st.write("Reason:", str(e))
-    st.stop()
-
-st.success("Google Sheet is accessible to the service account")
-
-# Ensure structure exists
-try:
-    ensure_user_sheet_initialized(ss, timezone_name="UTC")
-except Exception as e:
-    st.error("❌ Failed to initialize the required worksheets (log, etc).")
-    st.write("Reason:", str(e))
-    st.stop()
-
-st.success("Sheet structure OK (log, caches, app_state)")
-
-# -----------------------------
-# OAuth callback handling (state carries sheet_id; auto-sets ?sheet=...)
+# OAuth callback handling (first thing: handle code/state before doing extra reads)
 # -----------------------------
 redirect_uri = settings.public_app_url.rstrip("/")
-
 code = get_query_param("code")
 state_cb = get_query_param("state")
 error_cb = get_query_param("error")
@@ -477,30 +460,26 @@ if error_cb:
     clear_query_params()
     st.stop()
 
+# If Spotify redirected back with ?code&state — finish auth here.
+# We do NOT need to read/write oauth_state in Sheets.
 if code and state_cb:
-    decoded = decode_oauth_state(state_cb)
+    decoded = decode_oauth_state(state_cb, secret=settings.spotify_client_secret, max_age_seconds=3600)
     if not decoded:
-        st.error("Invalid OAuth state. Click Connect Spotify again.")
+        st.error("Invalid or expired OAuth state. Please click Connect Spotify again.")
         clear_query_params()
         st.stop()
 
-    sid_from_state = decoded["sid"]
+    sid_from_state = str(decoded["sid"]).strip()
 
-    # Always open the sheet referenced by OAuth state (works even if callback happens in a new tab)
+    # Open & init target sheet (one-time per session)
     try:
         ss_cb = sheets.open_by_key(sid_from_state)
-        ensure_user_sheet_initialized(ss_cb, timezone_name="UTC")
+        if st.session_state.get("inited_sheet_id") != sid_from_state:
+            ensure_user_sheet_initialized(ss_cb, timezone_name="UTC")
+            st.session_state["inited_sheet_id"] = sid_from_state
     except Exception as e:
         st.error("OAuth callback: cannot open/initialize the sheet from state.")
         st.write("Reason:", str(e))
-        clear_query_params()
-        st.stop()
-
-    sheet_state = read_app_state(ss_cb)
-    expected = (sheet_state.get("oauth_state") or "").strip()
-
-    if not expected or expected != state_cb:
-        st.error("OAuth state mismatch. Click Connect Spotify again.")
         clear_query_params()
         st.stop()
 
@@ -525,45 +504,118 @@ if code and state_cb:
             {
                 "spotify_user_id": spotify_user_id_cb,
                 "refresh_token_enc": refresh_enc,
-                "oauth_state": "",
                 "last_error": "",
             },
         )
 
-    # Land back on the main UI with the correct sheet pre-filled
+    # Return to app with sheet prefilled (no code/state in URL)
     clear_query_params()
     set_query_params(sheet=sid_from_state)
+
+    # Also set the active sheet in this session so user sees UI immediately
+    st.session_state["active_sheet_id"] = sid_from_state
+    st.session_state["render_dashboard"] = False
+    st.session_state["refresh_key"] += 1
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
 
     st.success("Spotify connected! Returning to your sheet…")
     st.rerun()
 
 # -----------------------------
-# Read state + registry
+# Sheet input (supports ?sheet=... auto-fill)
 # -----------------------------
-state = read_app_state(ss)
+sheet_from_qp = get_query_param("sheet")
+if sheet_from_qp and not st.session_state.get("sheet_input"):
+    st.session_state["sheet_input"] = sheet_from_qp
+
+sheet_input = st.text_input(
+    "Paste your Google Sheet URL or Sheet ID",
+    key="sheet_input",
+    placeholder="https://docs.google.com/spreadsheets/d/<ID>/edit ...",
+)
+
+candidate_sheet_id = extract_sheet_id(sheet_input)
+
+# "Load sheet" gating: we do not open Google Sheet on every rerun.
+col_a, col_b = st.columns([1.2, 3])
+with col_a:
+    load_clicked = st.button("📄 Load sheet", use_container_width=True)
+with col_b:
+    st.markdown('<div class="small-muted">This reduces Google Sheets API calls and helps avoid 429.</div>', unsafe_allow_html=True)
+
+if load_clicked:
+    if not candidate_sheet_id:
+        st.warning("Paste a valid Google Sheet link/ID first.")
+        st.stop()
+
+    # Switching sheet: reset heavy stuff
+    if st.session_state.get("active_sheet_id") != candidate_sheet_id:
+        st.session_state["active_sheet_id"] = candidate_sheet_id
+        st.session_state["render_dashboard"] = False
+        st.session_state["refresh_key"] += 1
+        st.session_state["registry_cache"] = {"ts": None, "registered": False, "enabled": False, "existing_sheet": None}
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+
+    set_query_params(sheet=candidate_sheet_id)
+    st.rerun()
+
+sheet_id = st.session_state.get("active_sheet_id")
+if not sheet_id:
+    st.info("Load a sheet to continue.")
+    st.stop()
+
+# -----------------------------
+# Open user sheet (only after "Load sheet")
+# -----------------------------
+try:
+    ss = sheets.open_by_key(sheet_id)
+except Exception as e:
+    st.error("❌ Can't open this Google Sheet with the service account.")
+    st.write("Reason:", str(e))
+    st.stop()
+
+st.success("Google Sheet is accessible to the service account")
+
+# Ensure structure exists (ONLY ONCE per session+sheet)
+if st.session_state.get("inited_sheet_id") != sheet_id:
+    try:
+        ensure_user_sheet_initialized(ss, timezone_name="UTC")
+        st.session_state["inited_sheet_id"] = sheet_id
+    except Exception as e:
+        st.error("❌ Failed to initialize the required worksheets (log, etc).")
+        st.write("Reason:", str(e))
+        st.stop()
+
+st.success("Sheet structure OK (cached for this session)")
+
+# -----------------------------
+# Read minimal state (small read; unavoidable if you want status)
+# -----------------------------
+try:
+    state = read_app_state(ss)
+except gspread.exceptions.APIError as e:
+    msg = str(e)
+    if "429" in msg or "Quota" in msg or "quota" in msg:
+        st.warning("Google Sheets quota exceeded (429). Wait ~60 seconds and reload.")
+        st.stop()
+    raise
+
 enabled_local = (state.get("enabled") or "false").lower() == "true"
 timezone_name = (state.get("timezone") or "UTC").strip() or "UTC"
 spotify_connected = bool((state.get("refresh_token_enc") or "").strip())
 spotify_user_id = (state.get("spotify_user_id") or "").strip()
 
-registry_ws = get_registry_ws_best_effort(sheets=sheets, settings=settings)
-registered, enabled_registry = (False, False)
-if registry_ws is not None:
-    registered, enabled_registry = registry_get_sheet_status(registry_ws, sheet_id)
-background_sync_on = registered and enabled_registry
-
-existing_sheet_for_user: str | None = None
-if spotify_connected and spotify_user_id and registry_ws is not None:
-    try:
-        existing_sheet_for_user = find_sheet_by_spotify_user_id(registry_ws, spotify_user_id)
-    except Exception:
-        existing_sheet_for_user = None
-
 # -----------------------------
-# Status
+# Status (registry is lazy: no reads unless user clicks "Check")
 # -----------------------------
 st.markdown("## Status")
-c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.7, 1.5])
+c1, c2, c3, c4, c5, c6 = st.columns([1.05, 1.05, 1.05, 1.6, 1.35, 1.1])
 
 with c1:
     st.markdown(
@@ -584,13 +636,52 @@ with c3:
 with c4:
     if spotify_user_id:
         st.markdown(f'<span class="badge">Spotify user id</span> <span class="badge">{spotify_user_id}</span>', unsafe_allow_html=True)
+
+# Registry status: cached for 60s if user checked
+reg = st.session_state.get("registry_cache") or {}
+reg_ts = reg.get("ts")
+reg_fresh = reg_ts and (datetime.now(timezone.utc) - reg_ts) < timedelta(seconds=60)
+
 with c5:
-    st.markdown(
-        f'<span class="badge">Background sync</span> <span class="success-pill">ON</span>'
-        if background_sync_on
-        else f'<span class="badge">Background sync</span> <span class="badge">OFF</span>',
-        unsafe_allow_html=True,
-    )
+    if reg_fresh:
+        bg_on = bool(reg.get("registered")) and bool(reg.get("enabled"))
+        st.markdown(
+            f'<span class="badge">Background sync</span> <span class="success-pill">ON</span>'
+            if bg_on
+            else f'<span class="badge">Background sync</span> <span class="badge">OFF</span>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown('<span class="badge">Background sync</span> <span class="badge">unknown</span>', unsafe_allow_html=True)
+
+with c6:
+    check_registry = st.button("Check", use_container_width=True)
+
+if check_registry:
+    registry_ws = get_registry_ws_best_effort(sheets=sheets, settings=settings)
+    registered, enabled_registry = (False, False)
+    existing_sheet_for_user: str | None = None
+
+    if registry_ws is not None:
+        registered, enabled_registry = registry_get_sheet_status(registry_ws, sheet_id)
+        if spotify_connected and spotify_user_id:
+            try:
+                existing_sheet_for_user = find_sheet_by_spotify_user_id(registry_ws, spotify_user_id)
+            except Exception:
+                existing_sheet_for_user = None
+
+    st.session_state["registry_cache"] = {
+        "ts": datetime.now(timezone.utc),
+        "registered": registered,
+        "enabled": enabled_registry,
+        "existing_sheet": existing_sheet_for_user,
+    }
+    st.rerun()
+
+existing_sheet_for_user = (st.session_state.get("registry_cache") or {}).get("existing_sheet")
+background_sync_on = False
+if reg_fresh:
+    background_sync_on = bool(reg.get("registered")) and bool(reg.get("enabled"))
 
 if spotify_connected and spotify_user_id and existing_sheet_for_user and existing_sheet_for_user != sheet_id:
     st.warning(
@@ -604,37 +695,23 @@ if spotify_connected and spotify_user_id and existing_sheet_for_user and existin
 # -----------------------------
 st.markdown("## Actions")
 
+# If we generated an auth url on previous run — redirect now
+if st.session_state.get("pending_auth_url"):
+    url = st.session_state.pop("pending_auth_url")
+    redirect_same_tab(url)
+    st.link_button("If you are not redirected, click here", url)
+    st.stop()
+
 if not spotify_connected:
     st.warning("Spotify is not connected yet. Connect via OAuth.")
 
-    # If we already generated an auth url on previous run — redirect now
-    if st.session_state.get("pending_auth_url"):
-        url = st.session_state.pop("pending_auth_url")
-        redirect_same_tab(url)
-
-        # Fallback if browser blocks JS navigation
-        st.link_button("If you are not redirected, click here", url)
-        st.stop()
-
     if st.button("Connect Spotify"):
-        import secrets
-
-        oauth_state = encode_oauth_state(sheet_id=sheet_id, nonce=secrets.token_urlsafe(10))
-
-        # Save oauth_state to __app_state (can hit 429 sometimes)
-        try:
-            write_app_state_kv(ss, {"oauth_state": oauth_state})
-        except gspread.exceptions.APIError as e:
-            msg = str(e)
-            if "429" in msg or "Quota" in msg or "quota" in msg:
-                st.warning(
-                    "Google Sheets API rate limit hit while saving oauth_state.\n\n"
-                    "Wait ~60 seconds, click **Refresh data**, then try **Connect Spotify** again."
-                )
-            else:
-                st.error("Failed to write oauth_state into __app_state.")
-                st.write(msg)
-            st.stop()
+        # Build signed state (NO Google write)
+        oauth_state = encode_oauth_state(
+            sheet_id=sheet_id,
+            now_utc=datetime.now(timezone.utc),
+            secret=settings.spotify_client_secret,
+        )
 
         scopes = ["user-read-recently-played", "user-read-email", "user-read-private"]
         url = build_auth_url(
@@ -644,13 +721,12 @@ if not spotify_connected:
             state=oauth_state,
         )
 
-        # Store url, rerun, then redirect on the next run (more reliable in Streamlit Cloud)
+        # redirect on next run (reliable on Streamlit Cloud)
         st.session_state["pending_auth_url"] = url
         st.rerun()
 
 else:
-    st.success("Spotify is connected")
-
+    st.success("Spotify is connected ✅")
 
     col1, col2, col3, col4 = st.columns([1.4, 1.4, 1.3, 1.9])
 
@@ -658,6 +734,7 @@ else:
     with col1:
         if not background_sync_on:
             if st.button("Enable background sync"):
+                registry_ws = get_registry_ws_best_effort(sheets=sheets, settings=settings)
                 if registry_ws is None:
                     st.error("Registry sheet is not accessible to the service account. Cron cannot work.")
                     st.stop()
@@ -665,16 +742,20 @@ else:
                     st.error("spotify_user_id is missing in __app_state. Reconnect Spotify.")
                     st.stop()
 
-                existing = find_sheet_by_spotify_user_id(registry_ws, spotify_user_id)
+                existing = None
+                try:
+                    existing = find_sheet_by_spotify_user_id(registry_ws, spotify_user_id)
+                except Exception:
+                    existing = None
+
                 if existing and existing != sheet_id:
                     st.error(
                         "This Spotify account is already connected to another sheet.\n\n"
                         f"**Active sheet:** `{existing}`\n\n"
-                        "To avoid multiple sheets per user, background sync will not be enabled here."
+                        "Background sync will not be enabled here."
                     )
                     st.stop()
 
-                # Register & enable (support both upsert_registry_user signatures)
                 try:
                     upsert_registry_user(
                         registry_ws,
@@ -686,6 +767,7 @@ else:
                     upsert_registry_user(registry_ws, user_sheet_id=sheet_id, enabled=True)
 
                 write_app_state_kv(ss, {"enabled": "true"})
+                st.session_state["registry_cache"] = {"ts": None, "registered": False, "enabled": False, "existing_sheet": None}
                 st.success("Background sync enabled")
                 st.rerun()
 
@@ -693,9 +775,11 @@ else:
     with col2:
         if background_sync_on:
             if st.button("Disable background sync"):
+                registry_ws = get_registry_ws_best_effort(sheets=sheets, settings=settings)
                 if registry_ws is None:
                     st.error("Registry sheet is not accessible to the service account.")
                     st.stop()
+
                 try:
                     upsert_registry_user(
                         registry_ws,
@@ -707,10 +791,10 @@ else:
                     upsert_registry_user(registry_ws, user_sheet_id=sheet_id, enabled=False)
 
                 write_app_state_kv(ss, {"enabled": "false"})
+                st.session_state["registry_cache"] = {"ts": None, "registered": False, "enabled": False, "existing_sheet": None}
                 st.info("Background sync disabled")
                 st.rerun()
 
-    # Refresh
     with col3:
         if st.button("Refresh data"):
             st.session_state["refresh_key"] += 1
@@ -725,37 +809,15 @@ else:
 st.divider()
 
 # -----------------------------
-# Dashboard controls (time range picker + render button)
+# Dashboard controls
 # -----------------------------
 st.markdown("## Dashboard")
-
-if not st.session_state.get("render_dashboard"):
-    st.info("Pick a date range in the sidebar and click **Render dashboard**.")
-else:
-    st.success("Dashboard rendered")
-
-# Load minimal log bounds for defaults
-try:
-    df_log_bounds = load_log_df_cached(settings, sheet_id)
-except gspread.exceptions.APIError as e:
-    msg = str(e)
-    if "Quota exceeded" in msg or "[429]" in msg or "429" in msg:
-        st.warning("Google Sheets quota exceeded (429). Wait ~60 seconds and click **Refresh data**.")
-        st.stop()
-    raise
-
-if df_log_bounds.empty:
-    st.info("No rows in log yet. Wait until the worker appends some plays.")
-    st.stop()
-
-min_dt = df_log_bounds["played_at_utc"].min().to_pydatetime()
-max_dt = df_log_bounds["played_at_utc"].max().to_pydatetime()
 
 with st.sidebar:
     st.markdown("### Time range")
     preset = st.selectbox(
         "Quick range",
-        ["Custom", "Last 7 days", "Last 30 days", "Last 90 days", "All time"],
+        ["Last 7 days", "Last 30 days", "Last 90 days", "Custom"],
         index=1,
     )
 
@@ -769,9 +831,6 @@ with st.sidebar:
     elif preset == "Last 90 days":
         default_from = (datetime.now(timezone.utc) - timedelta(days=90)).date()
         default_to = today_utc
-    elif preset == "All time":
-        default_from = min_dt.date()
-        default_to = max_dt.date()
     else:
         default_from = (datetime.now(timezone.utc) - timedelta(days=30)).date()
         default_to = today_utc
@@ -789,8 +848,8 @@ with st.sidebar:
         st.session_state["refresh_key"] += 1
         st.rerun()
 
-# Stop early unless user pressed render
 if not st.session_state.get("render_dashboard"):
+    st.info("Pick a date range in the sidebar and click **Render dashboard**.")
     st.stop()
 
 # -----------------------------
@@ -807,6 +866,10 @@ except gspread.exceptions.APIError as e:
         st.warning("Google Sheets quota exceeded (429). Wait ~60 seconds and click **Refresh data**.")
         st.stop()
     raise
+
+if df_log.empty:
+    st.info("No rows in log yet. Wait until the worker appends some plays.")
+    st.stop()
 
 # Filter by date range in user's timezone
 try:
@@ -994,14 +1057,12 @@ with tab_monthly:
     dfm = df.copy()
     dfm["month"] = dfm["played_at_utc"].dt.to_period("M").dt.to_timestamp()
 
-    # Active days per month (days with >=1 play)
     active_days = (
         dfm.groupby("month")["played_at_utc"]
         .apply(lambda s: s.dt.date.nunique())
         .reset_index(name="active_days")
     )
 
-    # Month-level totals
     month_agg = (
         dfm.groupby("month")
         .agg(plays=("track_id", "count"), minutes=("minutes", "sum"))
@@ -1012,7 +1073,6 @@ with tab_monthly:
     month_agg = month_agg.merge(active_days, on="month", how="left")
     month_agg["active_days"] = month_agg["active_days"].fillna(0).astype(int)
 
-    # Avoid division by zero
     month_agg["avg_tracks_per_active_day"] = month_agg.apply(
         lambda r: (r["plays"] / r["active_days"]) if r["active_days"] > 0 else 0.0,
         axis=1,
@@ -1022,7 +1082,6 @@ with tab_monthly:
         axis=1,
     )
 
-    # Top album per month (for cover markers)
     top_album = (
         dfm.groupby(["month", "album_id", "album_name"])
         .size()
@@ -1099,17 +1158,17 @@ with tab_genres:
             .head(5)
         )
 
-    ch = (
-        alt.Chart(g)
-        .mark_bar(color=SPOTIFY_GREEN)
-        .encode(
-            x=alt.X("plays:Q", title="Tracks"),
-            y=alt.Y("primary_genre:N", sort="-x", title=None),
-            tooltip=["primary_genre", "plays"],
+        ch = (
+            alt.Chart(g)
+            .mark_bar(color=SPOTIFY_GREEN)
+            .encode(
+                x=alt.X("plays:Q", title="Tracks"),
+                y=alt.Y("primary_genre:N", sort="-x", title=None),
+                tooltip=["primary_genre", "plays"],
+            )
+            .properties(height=300)
         )
-        .properties(height=300)
-    )
-    st.altair_chart(ch, use_container_width=True)
+        st.altair_chart(ch, use_container_width=True)
 
 # ===== Statistics =====
 with tab_stats:
