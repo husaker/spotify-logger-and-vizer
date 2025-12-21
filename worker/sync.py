@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 
 from app.sheets_client import SheetsClient
 from common.config import load_settings
@@ -9,13 +10,10 @@ from worker.registry import (
     ensure_registry_headers,
     read_registry,
     upsert_registry_user,
+    update_registry_status,
 )
 from worker.sync_one import sync_user_sheet
 from worker.user_sheet import ensure_user_sheet_initialized
-
-from datetime import datetime, timezone
-from worker.registry import update_registry_status
-
 
 
 def main() -> None:
@@ -31,7 +29,7 @@ def main() -> None:
 
     # Open registry
     registry_ss = sheets.open_by_key(settings.registry_sheet_id)
-    registry_ws = sheets.get_or_create_worksheet(registry_ss, REGISTRY_TAB, rows=1000, cols=10)
+    registry_ws = sheets.get_or_create_worksheet(registry_ss, REGISTRY_TAB, rows=1000, cols=12)
     ensure_registry_headers(registry_ws)
 
     # Init mode
@@ -67,6 +65,7 @@ def main() -> None:
     for sid in sheet_ids:
         try:
             user_ss = sheets.open_by_key(sid)
+
             added = sync_user_sheet(
                 user_ss,
                 dedup_read_rows=settings.dedup_read_rows,
@@ -76,12 +75,27 @@ def main() -> None:
                 spotify_client_secret=settings.spotify_client_secret,
                 cache_ttl_days=settings.cache_ttl_days,
             )
+
             total_added += added
             now = datetime.now(timezone.utc).isoformat()
-            update_registry_status(registry_ws, sid, last_sync_at=now, last_error="")
+
+            # IMPORTANT: update_registry_status is keyword-only (after '*')
+            update_registry_status(
+                registry_ws,
+                user_sheet_id=sid,
+                last_sync_at=now,
+                last_error="",
+            )
+
             print(f"✅ Synced {sid}: +{added} rows")
+
         except Exception as e:
-            update_registry_status(registry_ws, sid, last_sync_at=None, last_error=str(e))
+            update_registry_status(
+                registry_ws,
+                user_sheet_id=sid,
+                last_sync_at=None,
+                last_error=str(e),
+            )
             print(f"❌ Sync failed for {sid}: {e}")
 
     print(f"✅ Done. Total appended rows: {total_added}")
