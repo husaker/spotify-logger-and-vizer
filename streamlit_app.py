@@ -649,7 +649,7 @@ def render_activity_grid(
             scaleanchor="x",
             scaleratio=1,
         ),
-        height=240,
+        height=180,
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
