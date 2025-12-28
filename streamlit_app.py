@@ -638,18 +638,18 @@ def render_activity_grid(
     fig.update_layout(
         paper_bgcolor=SPOTIFY_BG,
         plot_bgcolor=SPOTIFY_BG,
-        margin=dict(l=60, r=20, t=30, b=20),  # меньше снизу, т.к. легенды нет
+        margin=dict(l=60, r=20, t=20, b=5),  # меньше снизу, т.к. легенды нет
         xaxis=dict(
             visible=False,
             range=[-3 * step, (n_weeks + 2) * step],
         ),
         yaxis=dict(
             visible=False,
-            range=[-1.0 * step, 8.0 * step],  # без “запаса” под легенду
+            range=[-0.6 * step, 7.6 * step],  # без “запаса” под легенду
             scaleanchor="x",
             scaleratio=1,
         ),
-        height=320,
+        height=240,
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
