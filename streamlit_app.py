@@ -586,18 +586,18 @@ def render_activity_grid(
             x1=x + half,
             y0=y - half,
             y1=y + half,
-            line=dict(width=1, color=SPOTIFY_BG),      # divider
+            line=dict(width=1, color=SPOTIFY_BG),  # divider
             fillcolor=palette[int(lvl)],
             layer="below",
         )
 
-    # invisible-ish scatter layer for hover
+    # invisible scatter layer for hover
     fig.add_trace(
         go.Scatter(
             x=grid["x"],
             y=grid["y"],
             mode="markers",
-            marker=dict(size=cell_px, opacity=0.0),  # invisible
+            marker=dict(size=cell_px, opacity=0.0),
             hovertemplate="%{text}<extra></extra>",
             text=hover,
         )
@@ -634,57 +634,22 @@ def render_activity_grid(
             yanchor="middle",
         )
 
-    # Legend bottom (Less ... More) — аккуратно, чтобы "Less" не налезал
-    legend_y = -1.2 * step
-    legend_x0 = (n_weeks * 0.45) * step
-
-    fig.add_annotation(
-        x=legend_x0,
-        y=legend_y,
-        text="Less",
-        showarrow=False,
-        font=dict(color=SPOTIFY_MUTED, size=16),
-        xanchor="right",
-        yanchor="middle",
-    )
-
-    lx0 = legend_x0 + 1.2 * step
-    for i in range(5):
-        fig.add_shape(
-            type="rect",
-            x0=lx0 + i * step - half,
-            x1=lx0 + i * step + half,
-            y0=legend_y - half,
-            y1=legend_y + half,
-            line=dict(width=1, color=SPOTIFY_BG),
-            fillcolor=palette[i],
-        )
-
-    fig.add_annotation(
-        x=lx0 + 5 * step + 0.4 * step,
-        y=legend_y,
-        text="More",
-        showarrow=False,
-        font=dict(color=SPOTIFY_MUTED, size=16),
-        xanchor="left",
-        yanchor="middle",
-    )
-
+    # Layout
     fig.update_layout(
         paper_bgcolor=SPOTIFY_BG,
         plot_bgcolor=SPOTIFY_BG,
-        margin=dict(l=60, r=20, t=30, b=60),
+        margin=dict(l=60, r=20, t=30, b=20),  # меньше снизу, т.к. легенды нет
         xaxis=dict(
             visible=False,
             range=[-3 * step, (n_weeks + 2) * step],
         ),
         yaxis=dict(
             visible=False,
-            range=[-2 * step, 8 * step],
-            scaleanchor="x",   # squares stay squares
+            range=[-1.0 * step, 8.0 * step],  # без “запаса” под легенду
+            scaleanchor="x",
             scaleratio=1,
         ),
-        height=360,
+        height=320,
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
