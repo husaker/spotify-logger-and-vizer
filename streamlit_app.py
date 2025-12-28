@@ -479,6 +479,8 @@ def render_activity_grid(
     """
 
     import plotly.graph_objects as go
+    import pandas as pd
+    from datetime import timedelta
 
     st.markdown(f"### Activity (last {days} days)")
 
@@ -510,6 +512,7 @@ def render_activity_grid(
         st.info(f"No activity data in the last {days} days.")
         return
 
+    # daily plays (we keep uniq_tracks for future if needed, but it's NOT in tooltip now)
     daily = (
         base.groupby("day", dropna=False)
         .agg(plays=("track_id", "size"), uniq_tracks=("track_id", pd.Series.nunique))
@@ -568,12 +571,11 @@ def render_activity_grid(
     grid["x"] = grid["week"] * step
     grid["y"] = (6 - grid["dow"]) * step
 
-    # hover text
+    # hover text (ONLY date + plays)
     hover = [
         f"<b>{d:%Y-%m-%d}</b> ({dn})<br>"
-        f"Plays: <b>{p}</b><br>"
-        f"Unique tracks: <b>{u}</b>"
-        for d, dn, p, u in zip(grid["day_ts"], grid["day_name"], grid["plays"], grid["uniq_tracks"])
+        f"Plays: <b>{p}</b>"
+        for d, dn, p in zip(grid["day_ts"], grid["day_name"], grid["plays"])
     ]
 
     fig = go.Figure()
@@ -606,6 +608,7 @@ def render_activity_grid(
     # Month labels (top)
     month_starts = pd.date_range(start, end, freq="MS").date
     used = set()
+    month_y = 7.15 * step  # чуть выше первой строки
     for m in month_starts:
         w = (m - first_monday).days // 7
         if w in used:
@@ -613,7 +616,7 @@ def render_activity_grid(
         used.add(w)
         fig.add_annotation(
             x=w * step - half,
-            y=7.5 * step,
+            y=month_y,
             text=pd.Timestamp(m).strftime("%b"),
             showarrow=False,
             font=dict(color=SPOTIFY_MUTED, size=16),
@@ -634,22 +637,27 @@ def render_activity_grid(
             yanchor="middle",
         )
 
-    # Layout
+    # --- Tight ranges to avoid "mystery whitespace"
+    y_min = -0.45 * step                 # небольшой верхний "воздух" над нижней строкой
+    y_max = month_y + 0.65 * step        # ровно чтобы поместились month labels
+
     fig.update_layout(
         paper_bgcolor=SPOTIFY_BG,
         plot_bgcolor=SPOTIFY_BG,
-        margin=dict(l=60, r=20, t=2, b=2),  # меньше снизу, т.к. легенды нет
+        margin=dict(l=60, r=20, t=6, b=6),  # реально маленькие маргины
         xaxis=dict(
             visible=False,
             range=[-3 * step, (n_weeks + 2) * step],
+            fixedrange=True,
         ),
         yaxis=dict(
             visible=False,
-            range=[-0.6 * step, 6.6 * step],  # без “запаса” под легенду
+            range=[y_min, y_max],
             scaleanchor="x",
             scaleratio=1,
+            fixedrange=True,
         ),
-        height=300,
+        height=280,  # чуть ниже, чтобы не было ощущения "пустоты"
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
