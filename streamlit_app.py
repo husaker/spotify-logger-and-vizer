@@ -468,16 +468,16 @@ def render_activity_grid(
     *,
     df_log: pd.DataFrame,
     tz,                 # ZoneInfo или timezone.utc
-    days: int = 365,     # окно "последние N дней"
-    cell_px: int = 14,   # размер клетки в пикселях
+    days: int = 365,     # окно последних N дней
+    cell_px: int = 16,   # размер клетки (чем больше — тем "ультра-чётче")
 ) -> None:
     """
     Interactive GitHub-like activity grid for last N days (rolling window).
-    - Metric: Plays only
+    - Plays only
     - Tooltip on hover: date, day name, plays, unique tracks
     - Coloring: percentile bins on active days only (0 + 4 levels)
-    - Legend: below
-    Rendered with Altair (hover works in Streamlit).
+    - Legend below
+    Built with Altair (hover works in Streamlit).
     """
 
     st.markdown(f"### Activity (last {days} days)")
@@ -529,15 +529,17 @@ def render_activity_grid(
     grid["uniq_tracks"] = grid["uniq_tracks"].astype(int)
 
     # --- map to week index / weekday (Mon=0..Sun=6), weeks start on Monday
-    # !!! FIX: use datetime.timedelta to keep python date (no .date() needed)
-    first_monday = start - timedelta(days=pd.Timestamp(start).weekday())  # python date
+    first_monday = start - timedelta(days=start.weekday())  # python date
 
     grid["week"] = grid["day"].apply(lambda d: (d - first_monday).days // 7).astype(int)
     grid["dow"] = pd.to_datetime(grid["day"]).dt.weekday.astype(int)
-    grid["day_ts"] = pd.to_datetime(grid["day"])  # for tooltip as date
+    grid["day_ts"] = pd.to_datetime(grid["day"])
     grid["day_name"] = pd.to_datetime(grid["day"]).dt.day_name()
 
     n_weeks = int(grid["week"].max()) + 1
+    if n_weeks <= 0:
+        st.info("Not enough data to render activity grid.")
+        return
 
     # --- percentile-based levels (active days only): 0 + [1..4]
     grid["level"] = 0
@@ -545,18 +547,17 @@ def render_activity_grid(
     if pos_mask.any():
         pos_vals = grid.loc[pos_mask, "plays"]
 
-        # prefer qcut into 4 bins; fallback to rank-based when duplicates collapse bins
         try:
             lvl = pd.qcut(pos_vals, q=4, labels=[1, 2, 3, 4], duplicates="drop").astype(int)
-            if lvl.nunique() < 4 and pos_vals.nunique() > 1:
-                raise ValueError("Too few unique bins after qcut")
+            # если из-за одинаковых значений бины схлопнулись слишком сильно — fallback
+            if lvl.nunique() < 2 and pos_vals.nunique() > 1:
+                raise ValueError("Too few bins after qcut")
             grid.loc[pos_mask, "level"] = lvl.values
         except Exception:
             pct = pos_vals.rank(pct=True, method="average")
-            # ceil without numpy
+            # ceil без numpy
             levels = (pct * 4.0).apply(lambda x: int(x) if float(x).is_integer() else int(x) + 1)
-            levels = levels.clip(lower=1, upper=4).astype(int)
-            grid.loc[pos_mask, "level"] = levels.values
+            grid.loc[pos_mask, "level"] = levels.clip(lower=1, upper=4).astype(int).values
 
     # --- palette for discrete levels (0..4)
     def _hex_to_rgba_str(hex_color: str, alpha: float) -> str:
@@ -567,18 +568,20 @@ def render_activity_grid(
         return f"rgba({r},{g},{b},{alpha})"
 
     color_range = [
-        _hex_to_rgba_str(SPOTIFY_BORDER, 1.0),    # level 0
-        _hex_to_rgba_str(SPOTIFY_GREEN, 0.25),    # level 1
-        _hex_to_rgba_str(SPOTIFY_GREEN, 0.45),    # level 2
-        _hex_to_rgba_str(SPOTIFY_GREEN, 0.65),    # level 3
-        _hex_to_rgba_str(SPOTIFY_GREEN, 1.00),    # level 4
+        _hex_to_rgba_str(SPOTIFY_BORDER, 1.0),  # 0
+        _hex_to_rgba_str(SPOTIFY_GREEN, 0.25),  # 1
+        _hex_to_rgba_str(SPOTIFY_GREEN, 0.45),  # 2
+        _hex_to_rgba_str(SPOTIFY_GREEN, 0.65),  # 3
+        _hex_to_rgba_str(SPOTIFY_GREEN, 1.00),  # 4
     ]
-
     level_domain = [0, 1, 2, 3, 4]
     color_scale = alt.Scale(domain=level_domain, range=color_range)
-
     dow_order = [0, 1, 2, 3, 4, 5, 6]  # Mon..Sun
 
+    grid_width = max(520, n_weeks * cell_px)
+    grid_height = 7 * cell_px
+
+    # --- main grid (rects)
     rect = (
         alt.Chart(grid)
         .mark_rect(cornerRadius=2)
@@ -593,89 +596,82 @@ def render_activity_grid(
                 alt.Tooltip("uniq_tracks:Q", title="Unique tracks", format=",d"),
             ],
         )
-        .properties(
-            width=max(420, n_weeks * cell_px),
-            height=7 * cell_px,
-            background=SPOTIFY_BG,
-        )
+        .properties(width=grid_width, height=grid_height, background=SPOTIFY_BG)
     )
 
-    # --- Month labels (top)
+    # --- left labels (Mon/Wed/Fri) as separate chart (stable, no layer)
+    ld = pd.DataFrame({"dow": [0, 2, 4], "label": ["Mon", "Wed", "Fri"]})
+    left_labels = (
+        alt.Chart(ld)
+        .mark_text(align="right", baseline="middle", dx=-4, fontSize=14, color=SPOTIFY_MUTED)
+        .encode(
+            y=alt.Y("dow:O", sort=dow_order, axis=None),
+            text="label:N",
+        )
+        .properties(width=48, height=grid_height, background=SPOTIFY_BG)
+    )
+
+    # --- months row (top) as separate chart
     month_starts = pd.date_range(start, end, freq="MS")
-    if len(month_starts) > 0:
-        md = pd.DataFrame({"m": month_starts})
+    md = pd.DataFrame({"m": month_starts})
+    if not md.empty:
         md["label"] = md["m"].dt.strftime("%b")
         md["m_date"] = md["m"].dt.date
         md["week"] = md["m_date"].apply(lambda d: (d - first_monday).days // 7).astype(int)
         md = md.drop_duplicates(subset=["week"]).copy()
 
-        months = (
-            alt.Chart(md)
-            .mark_text(align="left", baseline="middle", dy=-8, fontSize=13, color=SPOTIFY_MUTED)
-            .encode(
-                x=alt.X("week:O", axis=None),
-                y=alt.value(0),
-                text="label:N",
-            )
-        )
-    else:
-        months = alt.Chart(pd.DataFrame({"x": []})).mark_text()
-
-    # --- Left labels (Mon/Wed/Fri)
-    ld = pd.DataFrame({"dow": [0, 2, 4], "label": ["Mon", "Wed", "Fri"]})
-    left_labels = (
-        alt.Chart(ld)
-        .mark_text(align="right", baseline="middle", dx=-6, fontSize=13, color=SPOTIFY_MUTED)
+    months = (
+        alt.Chart(md if not md.empty else pd.DataFrame({"week": [], "label": []}))
+        .mark_text(align="left", baseline="middle", dx=2, fontSize=14, color=SPOTIFY_MUTED)
         .encode(
-            x=alt.value(0),
-            y=alt.Y("dow:O", sort=dow_order, axis=None),
+            x=alt.X("week:O", axis=None),
             text="label:N",
         )
+        .properties(width=grid_width, height=24, background=SPOTIFY_BG)
     )
 
-    grid_chart = (
-        alt.layer(rect, months, left_labels)
-        .resolve_scale(y="shared", x="shared")
+    # --- combine: months on top, (labels + rect) below
+    body = (
+        alt.hconcat(left_labels, rect, spacing=6)
+        .resolve_scale(y="shared")
         .configure_view(strokeOpacity=0)
-        .configure_axis(
-            grid=False,
-            domain=False,
-            ticks=False,
-            labelColor=SPOTIFY_MUTED,
-            titleColor=SPOTIFY_MUTED,
-        )
     )
 
-    # --- Legend (below): "Less [0..4] More"
+    grid_block = (
+        alt.vconcat(months, body, spacing=6)
+        .resolve_scale(x="shared")
+        .configure(background=SPOTIFY_BG)
+        .configure_view(strokeOpacity=0)
+    )
+
+    # --- legend (below)
     legend_df = pd.DataFrame({"level": level_domain, "x": list(range(len(level_domain)))})
     legend_rect = (
         alt.Chart(legend_df)
         .mark_rect(cornerRadius=2)
         .encode(
             x=alt.X("x:O", axis=None),
-            y=alt.value(0),
             color=alt.Color("level:Q", scale=color_scale, legend=None),
         )
-        .properties(width=cell_px * 5 + 24, height=cell_px)
+        .properties(width=cell_px * 5 + 26, height=cell_px, background=SPOTIFY_BG)
     )
     legend_less = (
         alt.Chart(pd.DataFrame({"t": ["Less"]}))
-        .mark_text(align="right", baseline="middle", dx=-10, fontSize=13, color=SPOTIFY_MUTED)
+        .mark_text(align="right", baseline="middle", dx=-8, fontSize=14, color=SPOTIFY_MUTED)
         .encode(x=alt.value(0), y=alt.value(cell_px / 2), text="t:N")
     )
     legend_more = (
         alt.Chart(pd.DataFrame({"t": ["More"]}))
-        .mark_text(align="left", baseline="middle", dx=(cell_px * 5 + 30), fontSize=13, color=SPOTIFY_MUTED)
+        .mark_text(align="left", baseline="middle", dx=(cell_px * 5 + 30), fontSize=14, color=SPOTIFY_MUTED)
         .encode(x=alt.value(0), y=alt.value(cell_px / 2), text="t:N")
     )
-
     legend = (
         alt.layer(legend_rect, legend_less, legend_more)
-        .properties(height=cell_px + 8, background=SPOTIFY_BG)
+        .properties(height=cell_px + 10, background=SPOTIFY_BG)
         .configure_view(strokeOpacity=0)
     )
 
-    final = alt.vconcat(grid_chart, legend, spacing=10).configure(background=SPOTIFY_BG)
+    final = alt.vconcat(grid_block, legend, spacing=10).configure(background=SPOTIFY_BG)
 
     st.altair_chart(final, width="stretch")
 
