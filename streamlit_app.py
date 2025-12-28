@@ -645,7 +645,7 @@ def render_activity_grid(
         ),
         yaxis=dict(
             visible=False,
-            range=[-0.6 * step, 7.6 * step],  # без “запаса” под легенду
+            range=[-0.6 * step, 6.6 * step],  # без “запаса” под легенду
             scaleanchor="x",
             scaleratio=1,
         ),
