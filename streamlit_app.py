@@ -467,25 +467,16 @@ def _hex_with_alpha(hex_color: str, alpha: float) -> str:
 def render_activity_grid(
     *,
     df_log: pd.DataFrame,
-    df_ct: pd.DataFrame,
-    tz,          # ZoneInfo или timezone.utc — ок
-    year: int,
+    tz,                   # ZoneInfo или timezone.utc
 ) -> None:
     """
-    GitHub-like activity grid for the given calendar year.
+    GitHub-like activity grid for the LAST 365 days (rolling year back from today in tz).
     Each cell = day. Columns = weeks (Mon-start), rows = day of week.
-    Metric: Plays / Minutes.
+    Metric: Plays only.
+    Legend moved to the bottom (not on the side).
     """
 
-    st.markdown("### Activity (this year)")
-
-    metric = st.radio(
-        "Heatmap metric",
-        ["Plays", "Minutes"],
-        horizontal=True,
-        index=0,
-        key="activity_grid_metric",
-    )
+    st.markdown("### Activity (last 365 days)")
 
     if df_log is None or df_log.empty:
         st.info("No activity data yet.")
@@ -497,52 +488,34 @@ def render_activity_grid(
     base["track_id"] = base["Spotify ID"].astype(str).fillna("")
     base = base[base["track_id"].str.len() > 0].copy()
 
-    # played_at_utc должен быть tz-aware
+    # tz-aware local time
     try:
         base["played_local"] = base["played_at_utc"].dt.tz_convert(tz)
     except Exception:
-        # на всякий случай: если вдруг tz-naive — считаем как UTC
         base["played_local"] = pd.to_datetime(base["played_at_utc"], utc=True).dt.tz_convert(tz)
 
     base["day"] = base["played_local"].dt.date
-    base["year"] = base["played_local"].dt.year
-    base = base[base["year"] == year].copy()
 
+    # --- rolling window: last 365 days inclusive
+    today_local = datetime.now(timezone.utc).astimezone(tz).date()
+    start = today_local - timedelta(days=364)  # inclusive range length 365
+    end = today_local
+
+    base = base[(base["day"] >= start) & (base["day"] <= end)].copy()
     if base.empty:
-        st.info("No activity data for this year yet.")
+        st.info("No activity data in the last 365 days.")
         return
 
-    # --- metric per play
-    if metric == "Minutes":
-        df_ct_local = df_ct.copy() if df_ct is not None else pd.DataFrame(columns=["track_id", "duration_ms"])
-        if "track_id" not in df_ct_local.columns:
-            df_ct_local["track_id"] = ""
-        df_ct_local["track_id"] = df_ct_local["track_id"].astype(str)
+    # Plays per day
+    daily = base.groupby("day", dropna=False).size().reset_index(name="value")
 
-        if "duration_ms_i" not in df_ct_local.columns:
-            df_ct_local["duration_ms_i"] = df_ct_local.get("duration_ms", "").apply(lambda x: safe_int(x, 0))
-
-        base = base.merge(df_ct_local[["track_id", "duration_ms_i"]], on="track_id", how="left")
-        base["minutes"] = (base["duration_ms_i"].fillna(0).astype(float) / 60000.0)
-
-        daily = base.groupby("day", dropna=False)["minutes"].sum().reset_index(name="value")
-        value_title = "Minutes"
-    else:
-        daily = base.groupby("day", dropna=False).size().reset_index(name="value")
-        value_title = "Plays"
-
-    # --- date span
-    today_local = datetime.now(timezone.utc).astimezone(tz).date()
-    start = date(year, 1, 1)
-    end = today_local if year == today_local.year else date(year, 12, 31)
-
+    # Full day grid (ensure empty days exist)
     all_days = pd.DataFrame({"day": pd.date_range(start, end, freq="D").date})
     grid = all_days.merge(daily, on="day", how="left").fillna({"value": 0.0})
 
     # --- map day -> (week_index, weekday)
-    first_monday = start - timedelta(days=start.weekday())  # Monday on/before Jan 1
-
-    grid["week"] = grid["day"].apply(lambda d: (d - first_monday).days // 7).astype(int)
+    start_monday = start - timedelta(days=start.weekday())  # Monday on/before start
+    grid["week"] = grid["day"].apply(lambda d: (d - start_monday).days // 7).astype(int)
     grid["dow"] = pd.to_datetime(grid["day"]).dt.weekday.astype(int)  # Mon=0..Sun=6
 
     n_weeks = int(grid["week"].max()) + 1
@@ -587,9 +560,11 @@ def render_activity_grid(
     # --- draw
     cell = 1.0
     gap = 0.18
-    width = n_weeks * (cell + gap) + 7
-    width_in = max(12, width / 6.2)   # auto scale
-    height_in = 2.6
+
+    # width (weeks) + a little left padding for weekday labels
+    width = n_weeks * (cell + gap) + 3.5
+    width_in = max(12, width / 6.2)
+    height_in = 2.9  # a bit taller to visually match the new legend row
 
     fig, ax = plt.subplots(figsize=(width_in, height_in))
     fig.patch.set_facecolor(SPOTIFY_BG)
@@ -603,8 +578,8 @@ def render_activity_grid(
         ax.add_patch(rect)
 
     # layout
-    ax.set_xlim(-2.5, n_weeks * (cell + gap) + 6)
-    ax.set_ylim(7 * (cell + gap), -2.2)  # invert y (Mon on top-ish)
+    ax.set_xlim(-2.5, n_weeks * (cell + gap) + 0.8)
+    ax.set_ylim(7 * (cell + gap) + 1.6, -2.0)  # invert y + extra space at bottom for legend
     ax.axis("off")
 
     # left labels (Mon/Wed/Fri)
@@ -613,43 +588,45 @@ def render_activity_grid(
         y = dow * (cell + gap) + cell * 0.75
         ax.text(-2.1, y, txt, color=SPOTIFY_MUTED, fontsize=10, va="center")
 
-    # month labels
+    # month labels based on rolling window
     month_starts = pd.date_range(start, end, freq="MS").date
     used = set()
     for m in month_starts:
-        w = (m - first_monday).days // 7
+        w = (m - start_monday).days // 7
+        if w < 0:
+            continue
         if w in used:
             continue
         used.add(w)
         x = w * (cell + gap)
-        ax.text(x, -1.0, m.strftime("%b"), color=SPOTIFY_MUTED, fontsize=10, ha="left", va="center")
+        ax.text(x, -0.95, m.strftime("%b"), color=SPOTIFY_MUTED, fontsize=10, ha="left", va="center")
 
-    # legend (Less ... More)
-    lx = n_weeks * (cell + gap) + 1.2
-    ly = 5.3
-    ax.text(lx - 0.8, ly + 0.55, "Less", color=SPOTIFY_MUTED, fontsize=10, va="center")
+    # legend moved to bottom (center-ish)
+    # place it under the grid area
+    legend_y = 7 * (cell + gap) + 0.25
+    legend_x0 = max(0.0, (n_weeks * (cell + gap) - (5 * (cell + gap) + 4.0)) / 2.0)
+
+    ax.text(legend_x0 - 1.1, legend_y + 0.55, "Less", color=SPOTIFY_MUTED, fontsize=10, va="center")
     for i in range(5):
-        rect = Rectangle((lx + i * (cell + gap), ly), cell, cell, linewidth=0, facecolor=palette[i])
+        rect = Rectangle(
+            (legend_x0 + i * (cell + gap), legend_y),
+            cell,
+            cell,
+            linewidth=0,
+            facecolor=palette[i],
+        )
         ax.add_patch(rect)
-    ax.text(lx + 5 * (cell + gap) + 0.3, ly + 0.55, "More", color=SPOTIFY_MUTED, fontsize=10, va="center")
+    ax.text(
+        legend_x0 + 5 * (cell + gap) + 0.3,
+        legend_y + 0.55,
+        "More",
+        color=SPOTIFY_MUTED,
+        fontsize=10,
+        va="center",
+    )
 
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
-
-
-def get_year_from_df_log(df_log: pd.DataFrame, tz) -> int:
-    """Year based on the latest play in df_log (in local timezone). Fallback to current year."""
-    try:
-        if df_log is None or df_log.empty or "played_at_utc" not in df_log.columns:
-            raise ValueError("empty df_log")
-
-        last_ts = pd.to_datetime(df_log["played_at_utc"], utc=True, errors="coerce").max()
-        if pd.isna(last_ts):
-            raise ValueError("no valid timestamps")
-
-        return last_ts.tz_convert(tz).year
-    except Exception:
-        return datetime.now(timezone.utc).astimezone(tz).year
 
 
 # -----------------------------
@@ -1223,12 +1200,9 @@ with k5:
 
 # Activity grid
 
-current_year_local = get_year_from_df_log(df_log, tz)
 render_activity_grid(
     df_log=df_log,
-    df_ct=df_ct,      # можно даже без duration_ms_i — функция сама сделает safe_int
     tz=tz,
-    year=current_year_local,
 )
 
 st.divider()
