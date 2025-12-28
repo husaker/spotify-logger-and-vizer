@@ -11,6 +11,7 @@ from typing import Any
 import altair as alt
 import gspread
 import pandas as pd
+import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
 from dateutil import parser as dtparser
