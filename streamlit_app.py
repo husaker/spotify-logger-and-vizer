@@ -15,8 +15,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dateutil import parser as dtparser
 from zoneinfo import ZoneInfo
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 
 from app.crypto import encrypt_str
 from app.gspread_retry import gcall
@@ -469,7 +467,8 @@ def render_activity_grid(
     df_log: pd.DataFrame,
     tz,                 # ZoneInfo или timezone.utc
     days: int = 365,     # окно последних N дней
-    cell_px: int = 16,   # размер клетки (чем больше — тем "ультра-чётче")
+    cell_px: int = 18,   # размер клетки (больше = четче/крупнее)
+    gap: float = 0.16,   # "зазор" между клетками (0..0.5)
 ) -> None:
     """
     Interactive GitHub-like activity grid for last N days (rolling window).
@@ -477,7 +476,7 @@ def render_activity_grid(
     - Tooltip on hover: date, day name, plays, unique tracks
     - Coloring: percentile bins on active days only (0 + 4 levels)
     - Legend below
-    Built with Altair (hover works in Streamlit).
+    Altair v6-safe: no axis=None, no layer, safe concat.
     """
 
     st.markdown(f"### Activity (last {days} days)")
@@ -486,13 +485,13 @@ def render_activity_grid(
         st.info("No activity data yet.")
         return
 
-    # --- base plays in local time
+    # --- base plays
     base = df_log[["played_at_utc", "Spotify ID"]].copy()
     base = base[base["played_at_utc"].notna()].copy()
     base["track_id"] = base["Spotify ID"].astype(str).fillna("")
     base = base[base["track_id"].str.len() > 0].copy()
 
-    # played_at_utc должен быть tz-aware
+    # tz-aware -> local date
     try:
         base["played_local"] = base["played_at_utc"].dt.tz_convert(tz)
     except Exception:
@@ -523,16 +522,16 @@ def render_activity_grid(
     )
 
     # --- fill missing days
-    all_days = pd.DataFrame({"day": pd.date_range(start, end, freq="D").date})
-    grid = all_days.merge(daily, on="day", how="left").fillna({"plays": 0, "uniq_tracks": 0})
+    grid = pd.DataFrame({"day": pd.date_range(start, end, freq="D").date})
+    grid = grid.merge(daily, on="day", how="left").fillna({"plays": 0, "uniq_tracks": 0})
     grid["plays"] = grid["plays"].astype(int)
     grid["uniq_tracks"] = grid["uniq_tracks"].astype(int)
 
-    # --- map to week index / weekday (Mon=0..Sun=6), weeks start on Monday
-    first_monday = start - timedelta(days=start.weekday())  # python date
-
+    # --- map to week / weekday (Mon=0..Sun=6)
+    first_monday = start - timedelta(days=start.weekday())  # date
     grid["week"] = grid["day"].apply(lambda d: (d - first_monday).days // 7).astype(int)
     grid["dow"] = pd.to_datetime(grid["day"]).dt.weekday.astype(int)
+
     grid["day_ts"] = pd.to_datetime(grid["day"])
     grid["day_name"] = pd.to_datetime(grid["day"]).dt.day_name()
 
@@ -541,7 +540,7 @@ def render_activity_grid(
         st.info("Not enough data to render activity grid.")
         return
 
-    # --- percentile-based levels (active days only): 0 + [1..4]
+    # --- percentile-based level: 0 + [1..4] on active days
     grid["level"] = 0
     pos_mask = grid["plays"] > 0
     if pos_mask.any():
@@ -549,17 +548,17 @@ def render_activity_grid(
 
         try:
             lvl = pd.qcut(pos_vals, q=4, labels=[1, 2, 3, 4], duplicates="drop").astype(int)
-            # если из-за одинаковых значений бины схлопнулись слишком сильно — fallback
+            # если бины схлопнулись — fallback на rank(pct)
             if lvl.nunique() < 2 and pos_vals.nunique() > 1:
                 raise ValueError("Too few bins after qcut")
             grid.loc[pos_mask, "level"] = lvl.values
         except Exception:
             pct = pos_vals.rank(pct=True, method="average")
-            # ceil без numpy
+            # ceil(pct*4) без numpy
             levels = (pct * 4.0).apply(lambda x: int(x) if float(x).is_integer() else int(x) + 1)
             grid.loc[pos_mask, "level"] = levels.clip(lower=1, upper=4).astype(int).values
 
-    # --- palette for discrete levels (0..4)
+    # --- color helpers
     def _hex_to_rgba_str(hex_color: str, alpha: float) -> str:
         h = hex_color.lstrip("#")
         r = int(h[0:2], 16)
@@ -567,27 +566,37 @@ def render_activity_grid(
         b = int(h[4:6], 16)
         return f"rgba({r},{g},{b},{alpha})"
 
-    color_range = [
-        _hex_to_rgba_str(SPOTIFY_BORDER, 1.0),  # 0
-        _hex_to_rgba_str(SPOTIFY_GREEN, 0.25),  # 1
-        _hex_to_rgba_str(SPOTIFY_GREEN, 0.45),  # 2
-        _hex_to_rgba_str(SPOTIFY_GREEN, 0.65),  # 3
-        _hex_to_rgba_str(SPOTIFY_GREEN, 1.00),  # 4
-    ]
     level_domain = [0, 1, 2, 3, 4]
+    color_range = [
+        _hex_to_rgba_str(SPOTIFY_BORDER, 1.0),
+        _hex_to_rgba_str(SPOTIFY_GREEN, 0.25),
+        _hex_to_rgba_str(SPOTIFY_GREEN, 0.45),
+        _hex_to_rgba_str(SPOTIFY_GREEN, 0.65),
+        _hex_to_rgba_str(SPOTIFY_GREEN, 1.00),
+    ]
     color_scale = alt.Scale(domain=level_domain, range=color_range)
-    dow_order = [0, 1, 2, 3, 4, 5, 6]  # Mon..Sun
+
+    # --- common scales (to keep squares + gaps)
+    # Чем больше paddingInner — тем больше зазор между бэндами.
+    pad_in = float(gap)
+    pad_out = min(0.12, pad_in)
+
+    x_scale = alt.Scale(paddingInner=pad_in, paddingOuter=pad_out)
+    y_scale = alt.Scale(paddingInner=pad_in, paddingOuter=pad_out)
+
+    # --- axis hidden (Altair v6-safe)
+    axis_hidden = alt.Axis(labels=False, ticks=False, domain=False, grid=False)
 
     grid_width = max(520, n_weeks * cell_px)
     grid_height = 7 * cell_px
 
-    # --- main grid (rects)
+    # --- main rect grid with tooltips
     rect = (
         alt.Chart(grid)
         .mark_rect(cornerRadius=2)
         .encode(
-            x=alt.X("week:O", axis=None),
-            y=alt.Y("dow:O", axis=None, sort=dow_order),
+            x=alt.X("week:O", scale=x_scale, axis=axis_hidden),
+            y=alt.Y("dow:O", scale=y_scale, axis=axis_hidden, sort=[0, 1, 2, 3, 4, 5, 6]),
             color=alt.Color("level:Q", scale=color_scale, legend=None),
             tooltip=[
                 alt.Tooltip("day_ts:T", title="Date", format="%Y-%m-%d"),
@@ -596,22 +605,22 @@ def render_activity_grid(
                 alt.Tooltip("uniq_tracks:Q", title="Unique tracks", format=",d"),
             ],
         )
-        .properties(width=grid_width, height=grid_height, background=SPOTIFY_BG)
+        .properties(width=grid_width, height=grid_height)
     )
 
-    # --- left labels (Mon/Wed/Fri) as separate chart (stable, no layer)
+    # --- left labels (Mon/Wed/Fri)
     ld = pd.DataFrame({"dow": [0, 2, 4], "label": ["Mon", "Wed", "Fri"]})
     left_labels = (
         alt.Chart(ld)
-        .mark_text(align="right", baseline="middle", dx=-4, fontSize=14, color=SPOTIFY_MUTED)
+        .mark_text(align="right", baseline="middle", dx=-6, fontSize=14, color=SPOTIFY_MUTED)
         .encode(
-            y=alt.Y("dow:O", sort=dow_order, axis=None),
+            y=alt.Y("dow:O", scale=y_scale, axis=axis_hidden, sort=[0, 1, 2, 3, 4, 5, 6]),
             text="label:N",
         )
-        .properties(width=48, height=grid_height, background=SPOTIFY_BG)
+        .properties(width=56, height=grid_height)
     )
 
-    # --- months row (top) as separate chart
+    # --- months row (top)
     month_starts = pd.date_range(start, end, freq="MS")
     md = pd.DataFrame({"m": month_starts})
     if not md.empty:
@@ -624,54 +633,55 @@ def render_activity_grid(
         alt.Chart(md if not md.empty else pd.DataFrame({"week": [], "label": []}))
         .mark_text(align="left", baseline="middle", dx=2, fontSize=14, color=SPOTIFY_MUTED)
         .encode(
-            x=alt.X("week:O", axis=None),
+            x=alt.X("week:O", scale=x_scale, axis=axis_hidden),
             text="label:N",
         )
-        .properties(width=grid_width, height=24, background=SPOTIFY_BG)
+        .properties(width=grid_width, height=22)
     )
 
-    # --- combine: months on top, (labels + rect) below
-    body = (
-        alt.hconcat(left_labels, rect, spacing=6)
-        .resolve_scale(y="shared")
-        .configure_view(strokeOpacity=0)
-    )
+    # --- compose (months top, then labels+grid)
+    body = alt.hconcat(left_labels, rect, spacing=8).resolve_scale(y="shared")
+    grid_block = alt.vconcat(months, body, spacing=6).resolve_scale(x="shared")
 
-    grid_block = (
-        alt.vconcat(months, body, spacing=6)
-        .resolve_scale(x="shared")
-        .configure(background=SPOTIFY_BG)
-        .configure_view(strokeOpacity=0)
-    )
-
-    # --- legend (below)
-    legend_df = pd.DataFrame({"level": level_domain, "x": list(range(len(level_domain)))})
-    legend_rect = (
-        alt.Chart(legend_df)
+    # --- legend below (NO layer): Less | boxes | More
+    legend_boxes = (
+        alt.Chart(pd.DataFrame({"lvl": level_domain, "x": list(range(len(level_domain)))}))
         .mark_rect(cornerRadius=2)
         .encode(
-            x=alt.X("x:O", axis=None),
-            color=alt.Color("level:Q", scale=color_scale, legend=None),
+            x=alt.X("x:O", axis=axis_hidden, scale=alt.Scale(paddingInner=pad_in, paddingOuter=pad_out)),
+            color=alt.Color("lvl:Q", scale=color_scale, legend=None),
         )
-        .properties(width=cell_px * 5 + 26, height=cell_px, background=SPOTIFY_BG)
-    )
-    legend_less = (
-        alt.Chart(pd.DataFrame({"t": ["Less"]}))
-        .mark_text(align="right", baseline="middle", dx=-8, fontSize=14, color=SPOTIFY_MUTED)
-        .encode(x=alt.value(0), y=alt.value(cell_px / 2), text="t:N")
-    )
-    legend_more = (
-        alt.Chart(pd.DataFrame({"t": ["More"]}))
-        .mark_text(align="left", baseline="middle", dx=(cell_px * 5 + 30), fontSize=14, color=SPOTIFY_MUTED)
-        .encode(x=alt.value(0), y=alt.value(cell_px / 2), text="t:N")
-    )
-    legend = (
-        alt.layer(legend_rect, legend_less, legend_more)
-        .properties(height=cell_px + 10, background=SPOTIFY_BG)
-        .configure_view(strokeOpacity=0)
+        .properties(width=cell_px * 5 + 26, height=cell_px)
     )
 
-    final = alt.vconcat(grid_block, legend, spacing=10).configure(background=SPOTIFY_BG)
+    legend_less = (
+        alt.Chart(pd.DataFrame({"t": ["Less"]}))
+        .mark_text(align="right", baseline="middle", fontSize=14, color=SPOTIFY_MUTED)
+        .encode(text="t:N")
+        .properties(width=56, height=cell_px)
+    )
+
+    legend_more = (
+        alt.Chart(pd.DataFrame({"t": ["More"]}))
+        .mark_text(align="left", baseline="middle", fontSize=14, color=SPOTIFY_MUTED)
+        .encode(text="t:N")
+        .properties(width=56, height=cell_px)
+    )
+
+    legend = alt.hconcat(legend_less, legend_boxes, legend_more, spacing=8)
+
+    final = (
+        alt.vconcat(grid_block, legend, spacing=10)
+        .configure(background=SPOTIFY_BG)
+        .configure_view(strokeOpacity=0)
+        .configure_axis(
+            labelColor=SPOTIFY_MUTED,
+            titleColor=SPOTIFY_MUTED,
+            gridColor=SPOTIFY_BORDER,
+            tickColor=SPOTIFY_BORDER,
+            domainColor=SPOTIFY_BORDER,
+        )
+    )
 
     st.altair_chart(final, width="stretch")
 
