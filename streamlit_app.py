@@ -469,7 +469,7 @@ def render_activity_grid(
     df_log: pd.DataFrame,
     tz,                 # ZoneInfo или timezone.utc
     days: int = 365,     # окно "последние N дней"
-    cell_px: int = 14,   # размер клетки в пикселях (визуально)
+    cell_px: int = 14,   # размер клетки в пикселях
 ) -> None:
     """
     Interactive GitHub-like activity grid for last N days (rolling window).
@@ -529,12 +529,12 @@ def render_activity_grid(
     grid["uniq_tracks"] = grid["uniq_tracks"].astype(int)
 
     # --- map to week index / weekday (Mon=0..Sun=6), weeks start on Monday
-    first_monday = start - pd.Timedelta(days=pd.Timestamp(start).weekday())
-    first_monday = first_monday.date()
+    # !!! FIX: use datetime.timedelta to keep python date (no .date() needed)
+    first_monday = start - timedelta(days=pd.Timestamp(start).weekday())  # python date
 
     grid["week"] = grid["day"].apply(lambda d: (d - first_monday).days // 7).astype(int)
     grid["dow"] = pd.to_datetime(grid["day"]).dt.weekday.astype(int)
-    grid["day_ts"] = pd.to_datetime(grid["day"])  # for Vega tooltip as date
+    grid["day_ts"] = pd.to_datetime(grid["day"])  # for tooltip as date
     grid["day_name"] = pd.to_datetime(grid["day"]).dt.day_name()
 
     n_weeks = int(grid["week"].max()) + 1
@@ -554,12 +554,11 @@ def render_activity_grid(
         except Exception:
             pct = pos_vals.rank(pct=True, method="average")
             # ceil without numpy
-            levels = (pct * 4.0).apply(lambda x: int(x) if x.is_integer() else int(x) + 1)
+            levels = (pct * 4.0).apply(lambda x: int(x) if float(x).is_integer() else int(x) + 1)
             levels = levels.clip(lower=1, upper=4).astype(int)
             grid.loc[pos_mask, "level"] = levels.values
 
     # --- palette for discrete levels (0..4)
-    # делаем "ступеньки" по альфе, как раньше
     def _hex_to_rgba_str(hex_color: str, alpha: float) -> str:
         h = hex_color.lstrip("#")
         r = int(h[0:2], 16)
@@ -578,7 +577,6 @@ def render_activity_grid(
     level_domain = [0, 1, 2, 3, 4]
     color_scale = alt.Scale(domain=level_domain, range=color_range)
 
-    # --- build activity grid chart
     dow_order = [0, 1, 2, 3, 4, 5, 6]  # Mon..Sun
 
     rect = (
@@ -616,7 +614,7 @@ def render_activity_grid(
             .mark_text(align="left", baseline="middle", dy=-8, fontSize=13, color=SPOTIFY_MUTED)
             .encode(
                 x=alt.X("week:O", axis=None),
-                y=alt.value(0),  # fixed pixel-ish
+                y=alt.value(0),
                 text="label:N",
             )
         )
@@ -661,12 +659,12 @@ def render_activity_grid(
         .properties(width=cell_px * 5 + 24, height=cell_px)
     )
     legend_less = (
-        alt.Chart(pd.DataFrame({"t": ["Less"], "x": [0]}))
+        alt.Chart(pd.DataFrame({"t": ["Less"]}))
         .mark_text(align="right", baseline="middle", dx=-10, fontSize=13, color=SPOTIFY_MUTED)
         .encode(x=alt.value(0), y=alt.value(cell_px / 2), text="t:N")
     )
     legend_more = (
-        alt.Chart(pd.DataFrame({"t": ["More"], "x": [0]}))
+        alt.Chart(pd.DataFrame({"t": ["More"]}))
         .mark_text(align="left", baseline="middle", dx=(cell_px * 5 + 30), fontSize=13, color=SPOTIFY_MUTED)
         .encode(x=alt.value(0), y=alt.value(cell_px / 2), text="t:N")
     )
