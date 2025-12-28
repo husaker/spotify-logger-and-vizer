@@ -15,6 +15,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dateutil import parser as dtparser
 from zoneinfo import ZoneInfo
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 from app.crypto import encrypt_str
 from app.gspread_retry import gcall
