@@ -420,6 +420,49 @@ def render_top_cards(items: list[dict[str, Any]], *, cols: int = 5) -> None:
             for line in it.get("lines", []):
                 st.markdown(f"<div>{line}</div>", unsafe_allow_html=True)
 
+# -----------------------------
+# Helpers for X axis
+# -----------------------------
+def add_bucket_labels(df: pd.DataFrame, grain: str) -> pd.DataFrame:
+    """
+    Adds:
+      - bucket_dt: datetime (normalized to date start)
+      - bucket_label: string label for axis
+    """
+    out = df.copy()
+    out["bucket_dt"] = pd.to_datetime(out["bucket"]).dt.normalize()
+
+    if grain == "Month":
+        # e.g. 12-2025
+        out["bucket_label"] = out["bucket_dt"].dt.strftime("%m-%Y")
+    else:
+        # Week: show Monday date (your bucket already is Monday start)
+        # e.g. 16 Dec 2025 (choose format you like)
+        out["bucket_label"] = out["bucket_dt"].dt.strftime("%d %b %Y")
+
+    return out
+
+
+def x_axis(grain: str) -> alt.X:
+    # If you have many weeks, angled labels help readability
+    angle = 0 if grain == "Month" else -45
+
+    return alt.X(
+        "bucket_label:N",
+        title=None,
+        sort=alt.SortField("bucket_dt", order="ascending"),
+        axis=alt.Axis(
+            labelAngle=angle,
+            labelOverlap="greedy",
+            # optional: reduce clutter if lots of ticks
+            # tickCount=12,
+        ),
+    )
+
+
+def period_tooltip():
+    # tooltip uses real datetime (not the label)
+    return alt.Tooltip("bucket_dt:T", title="Period")
 
 # -----------------------------
 # Header
@@ -1221,7 +1264,6 @@ with tab_genres:
         st.altair_chart(ch, width="stretch")
 
 # ===== Listening fingerprint (day of week × hour heatmap) =====
-# ===== Listening fingerprint (day of week × hour heatmap) =====
 with tab_fingerprint:
     st.markdown("### Listening fingerprint")
 
@@ -1369,6 +1411,9 @@ with tab_new_repeat:
             axis=1,
         )
 
+        # Add axis-friendly labels (fixes weird 12 PM ticks)
+        agg_wide = add_bucket_labels(agg_wide, grain)
+
         # Exploration score (weighted by plays) = total_new / total_plays
         total_all = float(agg_wide["total"].sum())
         exploration_score = (float(agg_wide["New"].sum()) / total_all) if total_all > 0 else 0.0
@@ -1386,7 +1431,7 @@ with tab_new_repeat:
 
         # long for stacked bars
         bars_df = agg_wide.melt(
-            id_vars=["bucket", "total", "new_share"],
+            id_vars=["bucket", "bucket_dt", "bucket_label", "total", "new_share"],
             value_vars=["New", "Repeat"],
             var_name="type",
             value_name="value",
@@ -1395,13 +1440,13 @@ with tab_new_repeat:
         color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
 
         # --- Top chart: New share line + points
-        line_df = agg_wide[["bucket", "new_share", "New", "Repeat", "total"]].copy()
+        line_df = agg_wide[["bucket", "bucket_dt", "bucket_label", "new_share", "New", "Repeat", "total"]].copy()
 
         share_line = (
             alt.Chart(line_df)
             .mark_line(color=SPOTIFY_GREEN, strokeWidth=2.5)
             .encode(
-                x=alt.X("bucket:T", title=None),
+                x=x_axis(grain),
                 y=alt.Y(
                     "new_share:Q",
                     title="New share",
@@ -1409,7 +1454,7 @@ with tab_new_repeat:
                     axis=alt.Axis(format="%"),
                 ),
                 tooltip=[
-                    alt.Tooltip("bucket:T", title="Period"),
+                    period_tooltip(),
                     alt.Tooltip("new_share:Q", title="New share", format=".1%"),
                     alt.Tooltip("New:Q", title="New plays", format=",d"),
                     alt.Tooltip("Repeat:Q", title="Repeat plays", format=",d"),
@@ -1422,10 +1467,10 @@ with tab_new_repeat:
             alt.Chart(line_df)
             .mark_point(color=SPOTIFY_GREEN, size=75, filled=True)
             .encode(
-                x=alt.X("bucket:T", title=None),
+                x=x_axis(grain),
                 y=alt.Y("new_share:Q", scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format="%")),
                 tooltip=[
-                    alt.Tooltip("bucket:T", title="Period"),
+                    period_tooltip(),
                     alt.Tooltip("new_share:Q", title="New share", format=".1%"),
                 ],
             )
@@ -1438,11 +1483,11 @@ with tab_new_repeat:
             alt.Chart(bars_df)
             .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
             .encode(
-                x=alt.X("bucket:T", title=None),
+                x=x_axis(grain),
                 y=alt.Y("value:Q", title="Plays", stack=True),
                 color=alt.Color("type:N", title=None, scale=color_scale),
                 tooltip=[
-                    alt.Tooltip("bucket:T", title="Period"),
+                    period_tooltip(),
                     alt.Tooltip("type:N", title="Type"),
                     alt.Tooltip("value:Q", title="Plays", format=",d"),
                     alt.Tooltip("total:Q", title="Total plays", format=",d"),
@@ -1452,11 +1497,10 @@ with tab_new_repeat:
             .properties(height=260)
         )
 
-        # --- Combine vertically (super stable vs layer+independent y)
         combo = (
             alt.vconcat(share_chart, bars, spacing=6)
             .resolve_scale(x="shared")
-            .configure_view(fill=SPOTIFY_BG, strokeOpacity=0)  # dark chart background
+            .configure_view(fill=SPOTIFY_BG, strokeOpacity=0)
             .configure_axis(
                 labelColor=SPOTIFY_MUTED,
                 titleColor=SPOTIFY_MUTED,
@@ -1470,7 +1514,7 @@ with tab_new_repeat:
         st.altair_chart(combo, width="stretch")
 
     # -----------------------
-    # 2) MINUTES: keep stacked (as before)
+    # 2) MINUTES
     # -----------------------
     elif mode == "Minutes":
         agg = (
@@ -1478,27 +1522,25 @@ with tab_new_repeat:
             .agg(value=("minutes", "sum"))
             .reset_index()
         )
-        y_title = "Minutes"
-        fmt = ".1f"
 
         if agg.empty:
             st.info("Not enough data for the selected range.")
         else:
-            color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
-            tooltip_nr = [
-                alt.Tooltip("bucket:T", title="Period"),
-                alt.Tooltip("type:N", title="Type"),
-                alt.Tooltip("value:Q", title=y_title, format=fmt),
-            ]
+            agg = add_bucket_labels(agg, grain)
 
+            color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
             ch = (
                 alt.Chart(agg)
                 .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
                 .encode(
-                    x=alt.X("bucket:T", title=None),
-                    y=alt.Y("value:Q", title=y_title, stack=True),
+                    x=x_axis(grain),
+                    y=alt.Y("value:Q", title="Minutes", stack=True),
                     color=alt.Color("type:N", title=None, scale=color_scale),
-                    tooltip=tooltip_nr,
+                    tooltip=[
+                        period_tooltip(),
+                        alt.Tooltip("type:N", title="Type"),
+                        alt.Tooltip("value:Q", title="Minutes", format=".1f"),
+                    ],
                 )
                 .properties(height=360, background=SPOTIFY_BG)
                 .configure_view(strokeOpacity=0)
@@ -1511,11 +1553,10 @@ with tab_new_repeat:
                 )
                 .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
             )
-
             st.altair_chart(ch, width="stretch")
 
     # -----------------------
-    # 3) UNIQUE TRACKS: keep stacked (as before)
+    # 3) UNIQUE TRACKS
     # -----------------------
     else:
         uniq_all = dnr.groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_all")
@@ -1531,27 +1572,24 @@ with tab_new_repeat:
             ignore_index=True,
         )
 
-        y_title = "Unique tracks"
-        fmt = ",d"
-
         if agg.empty:
             st.info("Not enough data for the selected range.")
         else:
-            color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
-            tooltip_nr = [
-                alt.Tooltip("bucket:T", title="Period"),
-                alt.Tooltip("type:N", title="Type"),
-                alt.Tooltip("value:Q", title=y_title, format=fmt),
-            ]
+            agg = add_bucket_labels(agg, grain)
 
+            color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
             ch = (
                 alt.Chart(agg)
                 .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
                 .encode(
-                    x=alt.X("bucket:T", title=None),
-                    y=alt.Y("value:Q", title=y_title, stack=True),
+                    x=x_axis(grain),
+                    y=alt.Y("value:Q", title="Unique tracks", stack=True),
                     color=alt.Color("type:N", title=None, scale=color_scale),
-                    tooltip=tooltip_nr,
+                    tooltip=[
+                        period_tooltip(),
+                        alt.Tooltip("type:N", title="Type"),
+                        alt.Tooltip("value:Q", title="Unique tracks", format=",d"),
+                    ],
                 )
                 .properties(height=360, background=SPOTIFY_BG)
                 .configure_view(strokeOpacity=0)
@@ -1564,5 +1602,4 @@ with tab_new_repeat:
                 )
                 .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
             )
-
             st.altair_chart(ch, width="stretch")
