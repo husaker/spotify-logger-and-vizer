@@ -467,33 +467,32 @@ def _hex_with_alpha(hex_color: str, alpha: float) -> str:
 def render_activity_grid(
     *,
     df_log: pd.DataFrame,
-    tz,  # ZoneInfo | timezone.utc
+    tz,                 # ZoneInfo или timezone.utc
+    days: int = 365,     # окно "последние N дней"
+    cell_px: int = 14,   # размер клетки в пикселях (визуально)
 ) -> None:
     """
-    Ultra-crisp GitHub-like activity grid for the last 365 days (rolling window).
-    Each cell = day. Columns = weeks (Mon-start), rows = day of week.
-    Metric: Plays only.
-    Coloring: percentile-based (active days only), 0 + 4 levels.
-    Legend: below, centered.
-    Rendering: square cells + high DPI.
+    Interactive GitHub-like activity grid for last N days (rolling window).
+    - Metric: Plays only
+    - Tooltip on hover: date, day name, plays, unique tracks
+    - Coloring: percentile bins on active days only (0 + 4 levels)
+    - Legend: below
+    Rendered with Altair (hover works in Streamlit).
     """
 
-    from datetime import datetime, timedelta, timezone
-
-    st.markdown("### Activity (last 365 days)")
+    st.markdown(f"### Activity (last {days} days)")
 
     if df_log is None or df_log.empty or "played_at_utc" not in df_log.columns:
         st.info("No activity data yet.")
         return
 
-    # -----------------------------
-    # Base plays in local time
-    # -----------------------------
+    # --- base plays in local time
     base = df_log[["played_at_utc", "Spotify ID"]].copy()
     base = base[base["played_at_utc"].notna()].copy()
     base["track_id"] = base["Spotify ID"].astype(str).fillna("")
     base = base[base["track_id"].str.len() > 0].copy()
 
+    # played_at_utc должен быть tz-aware
     try:
         base["played_local"] = base["played_at_utc"].dt.tz_convert(tz)
     except Exception:
@@ -503,222 +502,184 @@ def render_activity_grid(
 
     base["day"] = base["played_local"].dt.date
 
-    # -----------------------------
-    # Rolling 365 days
-    # -----------------------------
-    today_local = datetime.now(timezone.utc).astimezone(tz).date()
+    # --- rolling window
+    today_local = pd.Timestamp.now(tz).date()
+    start = (pd.Timestamp(today_local) - pd.Timedelta(days=days - 1)).date()
     end = today_local
-    start = end - timedelta(days=364)
 
     base = base[(base["day"] >= start) & (base["day"] <= end)].copy()
     if base.empty:
-        st.info("No activity data in the last 365 days.")
+        st.info(f"No activity data in the last {days} days.")
         return
 
-    daily = base.groupby("day", dropna=False).size().reset_index(name="value")  # plays per day
+    # --- daily metrics
+    daily = (
+        base.groupby("day", dropna=False)
+        .agg(
+            plays=("track_id", "size"),
+            uniq_tracks=("track_id", pd.Series.nunique),
+        )
+        .reset_index()
+    )
 
+    # --- fill missing days
     all_days = pd.DataFrame({"day": pd.date_range(start, end, freq="D").date})
-    grid = all_days.merge(daily, on="day", how="left").fillna({"value": 0})
-    grid["value"] = grid["value"].astype(int)
+    grid = all_days.merge(daily, on="day", how="left").fillna({"plays": 0, "uniq_tracks": 0})
+    grid["plays"] = grid["plays"].astype(int)
+    grid["uniq_tracks"] = grid["uniq_tracks"].astype(int)
 
-    # -----------------------------
-    # Map day -> (week_index, weekday)
-    # -----------------------------
-    first_monday = start - timedelta(days=start.weekday())  # Monday on/before start
+    # --- map to week index / weekday (Mon=0..Sun=6), weeks start on Monday
+    first_monday = start - pd.Timedelta(days=pd.Timestamp(start).weekday())
+    first_monday = first_monday.date()
+
     grid["week"] = grid["day"].apply(lambda d: (d - first_monday).days // 7).astype(int)
-    grid["dow"] = pd.to_datetime(grid["day"]).dt.weekday.astype(int)  # Mon=0..Sun=6
+    grid["dow"] = pd.to_datetime(grid["day"]).dt.weekday.astype(int)
+    grid["day_ts"] = pd.to_datetime(grid["day"])  # for Vega tooltip as date
+    grid["day_name"] = pd.to_datetime(grid["day"]).dt.day_name()
+
     n_weeks = int(grid["week"].max()) + 1
 
-    # -----------------------------
-    # Percentile-based levels: 0 + 4 bins on active days only
-    # -----------------------------
+    # --- percentile-based levels (active days only): 0 + [1..4]
     grid["level"] = 0
-    pos_mask = grid["value"] > 0
-
+    pos_mask = grid["plays"] > 0
     if pos_mask.any():
-        pos_vals = grid.loc[pos_mask, "value"]
+        pos_vals = grid.loc[pos_mask, "plays"]
+
+        # prefer qcut into 4 bins; fallback to rank-based when duplicates collapse bins
         try:
-            grid.loc[pos_mask, "level"] = (
-                pd.qcut(pos_vals, q=4, labels=[1, 2, 3, 4], duplicates="drop").astype(int)
-            )
-            if grid.loc[pos_mask, "level"].nunique() < 4:
+            lvl = pd.qcut(pos_vals, q=4, labels=[1, 2, 3, 4], duplicates="drop").astype(int)
+            if lvl.nunique() < 4 and pos_vals.nunique() > 1:
                 raise ValueError("Too few unique bins after qcut")
+            grid.loc[pos_mask, "level"] = lvl.values
         except Exception:
             pct = pos_vals.rank(pct=True, method="average")
+            # ceil without numpy
+            levels = (pct * 4.0).apply(lambda x: int(x) if x.is_integer() else int(x) + 1)
+            levels = levels.clip(lower=1, upper=4).astype(int)
+            grid.loc[pos_mask, "level"] = levels.values
 
-            def _ceil(x: float) -> int:
-                xi = int(x)
-                return xi if x == xi else xi + 1
-
-            tmp = (pct * 4.0)
-            levels = tmp.apply(_ceil).clip(lower=1, upper=4).astype(int)
-            grid.loc[pos_mask, "level"] = levels
-
-    # -----------------------------
-    # Colors (Spotify-ish)
-    # -----------------------------
-    def rgba(hex_color: str, a: float) -> tuple[float, float, float, float]:
+    # --- palette for discrete levels (0..4)
+    # делаем "ступеньки" по альфе, как раньше
+    def _hex_to_rgba_str(hex_color: str, alpha: float) -> str:
         h = hex_color.lstrip("#")
-        r = int(h[0:2], 16) / 255.0
-        g = int(h[2:4], 16) / 255.0
-        b = int(h[4:6], 16) / 255.0
-        return (r, g, b, a)
+        r = int(h[0:2], 16)
+        g = int(h[2:4], 16)
+        b = int(h[4:6], 16)
+        return f"rgba({r},{g},{b},{alpha})"
 
-    palette = {
-        0: rgba(SPOTIFY_BORDER, 1.0),
-        1: rgba(SPOTIFY_GREEN, 0.25),
-        2: rgba(SPOTIFY_GREEN, 0.45),
-        3: rgba(SPOTIFY_GREEN, 0.65),
-        4: rgba(SPOTIFY_GREEN, 1.0),
-    }
+    color_range = [
+        _hex_to_rgba_str(SPOTIFY_BORDER, 1.0),    # level 0
+        _hex_to_rgba_str(SPOTIFY_GREEN, 0.25),    # level 1
+        _hex_to_rgba_str(SPOTIFY_GREEN, 0.45),    # level 2
+        _hex_to_rgba_str(SPOTIFY_GREEN, 0.65),    # level 3
+        _hex_to_rgba_str(SPOTIFY_GREEN, 1.00),    # level 4
+    ]
 
-    # -----------------------------
-    # Draw (ultra-crisp)
-    # -----------------------------
-    # Geometry
-    cell = 1.0
-    gap = 0.18
+    level_domain = [0, 1, 2, 3, 4]
+    color_scale = alt.Scale(domain=level_domain, range=color_range)
 
-    grid_w = n_weeks * (cell + gap)
-    grid_h = 7 * (cell + gap)
+    # --- build activity grid chart
+    dow_order = [0, 1, 2, 3, 4, 5, 6]  # Mon..Sun
 
-    left_pad = 3.4
-    top_pad = 1.7
-    bottom_pad = 2.9  # space for legend below
-
-    x_total = left_pad + grid_w + 0.8
-    y_total = top_pad + grid_h + bottom_pad
-
-    # ULTRA params
-    dpi = 280
-    scale = 0.52  # bigger => more pixels (heavier but crisp)
-
-    fig_w = max(14.0, x_total * scale)
-    fig_h = max(4.3, y_total * scale)
-
-    # Force high DPI in backend too
-    old_fig_dpi = plt.rcParams.get("figure.dpi", None)
-    old_save_dpi = plt.rcParams.get("savefig.dpi", None)
-    plt.rcParams["figure.dpi"] = dpi
-    plt.rcParams["savefig.dpi"] = dpi
-
-    try:
-        fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
-        fig.patch.set_facecolor(SPOTIFY_BG)
-        ax.set_facecolor(SPOTIFY_BG)
-
-        # Cells
-        for _, r in grid.iterrows():
-            x = left_pad + r["week"] * (cell + gap)
-            y = top_pad + r["dow"] * (cell + gap)
-            ax.add_patch(
-                Rectangle(
-                    (x, y),
-                    cell,
-                    cell,
-                    linewidth=0,
-                    facecolor=palette[int(r["level"])],
-                    antialiased=True,
-                )
-            )
-
-        # Layout + square cells
-        ax.set_xlim(0, x_total)
-        ax.set_ylim(y_total, 0)  # invert y
-        ax.axis("off")
-        ax.set_aspect("equal", adjustable="box")
-
-        # Left labels (Mon/Wed/Fri)
-        label_map = {0: "Mon", 2: "Wed", 4: "Fri"}
-        for dow, txt in label_map.items():
-            y = top_pad + dow * (cell + gap) + cell * 0.72
-            ax.text(
-                left_pad - 1.2,
-                y,
-                txt,
-                color=SPOTIFY_MUTED,
-                fontsize=14,
-                va="center",
-                ha="right",
-            )
-
-        # Month labels
-        month_starts = pd.date_range(start, end, freq="MS").date
-        used_weeks = set()
-        for m in month_starts:
-            w = (m - first_monday).days // 7
-            if w in used_weeks:
-                continue
-            used_weeks.add(w)
-            x = left_pad + w * (cell + gap)
-            ax.text(
-                x,
-                top_pad - 0.82,
-                m.strftime("%b"),
-                color=SPOTIFY_MUTED,
-                fontsize=15,
-                ha="left",
-                va="center",
-            )
-
-        # Legend BELOW centered
-        legend_y = top_pad + grid_h + 1.30
-
-        legend_cells = 5
-        legend_cells_w = legend_cells * cell + (legend_cells - 1) * gap
-        less_w = 1.55
-        more_w = 1.55
-        pad = 0.85
-
-        total_legend_w = less_w + pad + legend_cells_w + pad + more_w
-        center_x = left_pad + grid_w / 2.0
-        legend_x0 = center_x - total_legend_w / 2.0
-
-        ax.text(
-            legend_x0 + less_w,
-            legend_y + cell * 0.55,
-            "Less",
-            color=SPOTIFY_MUTED,
-            fontsize=15,
-            ha="right",
-            va="center",
+    rect = (
+        alt.Chart(grid)
+        .mark_rect(cornerRadius=2)
+        .encode(
+            x=alt.X("week:O", axis=None),
+            y=alt.Y("dow:O", axis=None, sort=dow_order),
+            color=alt.Color("level:Q", scale=color_scale, legend=None),
+            tooltip=[
+                alt.Tooltip("day_ts:T", title="Date", format="%Y-%m-%d"),
+                alt.Tooltip("day_name:N", title="Day"),
+                alt.Tooltip("plays:Q", title="Plays", format=",d"),
+                alt.Tooltip("uniq_tracks:Q", title="Unique tracks", format=",d"),
+            ],
         )
-
-        cells_x0 = legend_x0 + less_w + pad
-        for i in range(5):
-            ax.add_patch(
-                Rectangle(
-                    (cells_x0 + i * (cell + gap), legend_y),
-                    cell,
-                    cell,
-                    linewidth=0,
-                    facecolor=palette[i],
-                    antialiased=True,
-                )
-            )
-
-        ax.text(
-            cells_x0 + legend_cells_w + pad,
-            legend_y + cell * 0.55,
-            "More",
-            color=SPOTIFY_MUTED,
-            fontsize=15,
-            ha="left",
-            va="center",
+        .properties(
+            width=max(420, n_weeks * cell_px),
+            height=7 * cell_px,
+            background=SPOTIFY_BG,
         )
+    )
 
-        # Avoid cropping text
-        fig.subplots_adjust(left=0.01, right=0.995, top=0.975, bottom=0.07)
+    # --- Month labels (top)
+    month_starts = pd.date_range(start, end, freq="MS")
+    if len(month_starts) > 0:
+        md = pd.DataFrame({"m": month_starts})
+        md["label"] = md["m"].dt.strftime("%b")
+        md["m_date"] = md["m"].dt.date
+        md["week"] = md["m_date"].apply(lambda d: (d - first_monday).days // 7).astype(int)
+        md = md.drop_duplicates(subset=["week"]).copy()
 
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
+        months = (
+            alt.Chart(md)
+            .mark_text(align="left", baseline="middle", dy=-8, fontSize=13, color=SPOTIFY_MUTED)
+            .encode(
+                x=alt.X("week:O", axis=None),
+                y=alt.value(0),  # fixed pixel-ish
+                text="label:N",
+            )
+        )
+    else:
+        months = alt.Chart(pd.DataFrame({"x": []})).mark_text()
 
-    finally:
-        # restore rcParams
-        if old_fig_dpi is not None:
-            plt.rcParams["figure.dpi"] = old_fig_dpi
-        if old_save_dpi is not None:
-            plt.rcParams["savefig.dpi"] = old_save_dpi
+    # --- Left labels (Mon/Wed/Fri)
+    ld = pd.DataFrame({"dow": [0, 2, 4], "label": ["Mon", "Wed", "Fri"]})
+    left_labels = (
+        alt.Chart(ld)
+        .mark_text(align="right", baseline="middle", dx=-6, fontSize=13, color=SPOTIFY_MUTED)
+        .encode(
+            x=alt.value(0),
+            y=alt.Y("dow:O", sort=dow_order, axis=None),
+            text="label:N",
+        )
+    )
+
+    grid_chart = (
+        alt.layer(rect, months, left_labels)
+        .resolve_scale(y="shared", x="shared")
+        .configure_view(strokeOpacity=0)
+        .configure_axis(
+            grid=False,
+            domain=False,
+            ticks=False,
+            labelColor=SPOTIFY_MUTED,
+            titleColor=SPOTIFY_MUTED,
+        )
+    )
+
+    # --- Legend (below): "Less [0..4] More"
+    legend_df = pd.DataFrame({"level": level_domain, "x": list(range(len(level_domain)))})
+    legend_rect = (
+        alt.Chart(legend_df)
+        .mark_rect(cornerRadius=2)
+        .encode(
+            x=alt.X("x:O", axis=None),
+            y=alt.value(0),
+            color=alt.Color("level:Q", scale=color_scale, legend=None),
+        )
+        .properties(width=cell_px * 5 + 24, height=cell_px)
+    )
+    legend_less = (
+        alt.Chart(pd.DataFrame({"t": ["Less"], "x": [0]}))
+        .mark_text(align="right", baseline="middle", dx=-10, fontSize=13, color=SPOTIFY_MUTED)
+        .encode(x=alt.value(0), y=alt.value(cell_px / 2), text="t:N")
+    )
+    legend_more = (
+        alt.Chart(pd.DataFrame({"t": ["More"], "x": [0]}))
+        .mark_text(align="left", baseline="middle", dx=(cell_px * 5 + 30), fontSize=13, color=SPOTIFY_MUTED)
+        .encode(x=alt.value(0), y=alt.value(cell_px / 2), text="t:N")
+    )
+
+    legend = (
+        alt.layer(legend_rect, legend_less, legend_more)
+        .properties(height=cell_px + 8, background=SPOTIFY_BG)
+        .configure_view(strokeOpacity=0)
+    )
+
+    final = alt.vconcat(grid_chart, legend, spacing=10).configure(background=SPOTIFY_BG)
+
+    st.altair_chart(final, width="stretch")
 
 
 # -----------------------------
