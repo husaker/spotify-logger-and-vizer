@@ -674,8 +674,8 @@ def render_activity_grid(
         )
     )
 
-    st.altair_chart(final, use_container_width=True)
-
+    #st.altair_chart(final, use_container_width=True)
+    st.vega_lite_chart(final.to_dict(), use_container_width=True)
 
 # -----------------------------
 # Header
