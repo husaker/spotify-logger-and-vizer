@@ -478,6 +478,8 @@ def render_activity_grid(
     Coloring: 0 + 4 levels via percentiles on active days.
     """
 
+    import plotly.graph_objects as go
+
     st.markdown(f"### Activity (last {days} days)")
 
     if df_log is None or df_log.empty or "played_at_utc" not in df_log.columns:
@@ -535,8 +537,6 @@ def render_activity_grid(
         pos_vals = grid.loc[pos, "plays"]
         try:
             qlvl = pd.qcut(pos_vals, q=4, labels=[1, 2, 3, 4], duplicates="drop").astype(int)
-            if qlvl.nunique() < 2 and pos_vals.nunique() > 1:
-                raise ValueError("Too few bins after qcut")
             grid.loc[pos, "level"] = qlvl.values
         except Exception:
             pct = pos_vals.rank(pct=True, method="average")
@@ -560,14 +560,15 @@ def render_activity_grid(
         4: rgba(SPOTIFY_GREEN, 1.00),
     }
 
-    # Build scatter of square markers
-    x = grid["week"].tolist()
-    y = grid["dow"].tolist()
-    colors = [palette[int(l)] for l in grid["level"].tolist()]
+    # --- grid geometry in "px-like" units
+    step = cell_px + gap_px
+    half = cell_px / 2.0
 
-    # Make y visually top-down (Mon on top)
-    y_plot = [6 - d for d in y]  # invert
+    # convert grid coords to plot coords (invert y so Mon is top)
+    grid["x"] = grid["week"] * step
+    grid["y"] = (6 - grid["dow"]) * step
 
+    # hover text
     hover = [
         f"<b>{d:%Y-%m-%d}</b> ({dn})<br>"
         f"Plays: <b>{p}</b><br>"
@@ -575,17 +576,28 @@ def render_activity_grid(
         for d, dn, p, u in zip(grid["day_ts"], grid["day_name"], grid["plays"], grid["uniq_tracks"])
     ]
 
-    fig = go.Figure(
-        data=go.Scatter(
-            x=x,
-            y=y_plot,
+    fig = go.Figure()
+
+    # shapes for real squares + real gaps + borders
+    for x, y, lvl in zip(grid["x"], grid["y"], grid["level"]):
+        fig.add_shape(
+            type="rect",
+            x0=x - half,
+            x1=x + half,
+            y0=y - half,
+            y1=y + half,
+            line=dict(width=1, color=SPOTIFY_BG),      # divider
+            fillcolor=palette[int(lvl)],
+            layer="below",
+        )
+
+    # invisible-ish scatter layer for hover
+    fig.add_trace(
+        go.Scatter(
+            x=grid["x"],
+            y=grid["y"],
             mode="markers",
-            marker=dict(
-                symbol="square",
-                size=cell_px,
-                color=colors,
-                line=dict(width=0),
-            ),
+            marker=dict(size=cell_px, opacity=0.0),  # invisible
             hovertemplate="%{text}<extra></extra>",
             text=hover,
         )
@@ -593,22 +605,16 @@ def render_activity_grid(
 
     # Month labels (top)
     month_starts = pd.date_range(start, end, freq="MS").date
-    month_x = []
-    month_txt = []
     used = set()
     for m in month_starts:
         w = (m - first_monday).days // 7
         if w in used:
             continue
         used.add(w)
-        month_x.append(w)
-        month_txt.append(pd.Timestamp(m).strftime("%b"))
-
-    for mx, mt in zip(month_x, month_txt):
         fig.add_annotation(
-            x=mx,
-            y=7.25,
-            text=mt,
+            x=w * step - half,
+            y=7.5 * step,
+            text=pd.Timestamp(m).strftime("%b"),
             showarrow=False,
             font=dict(color=SPOTIFY_MUTED, size=16),
             xanchor="left",
@@ -619,8 +625,8 @@ def render_activity_grid(
     label_map = {0: "Mon", 2: "Wed", 4: "Fri"}
     for dow, txt in label_map.items():
         fig.add_annotation(
-            x=-1,
-            y=6 - dow,
+            x=-2.0 * step,
+            y=(6 - dow) * step,
             text=txt,
             showarrow=False,
             font=dict(color=SPOTIFY_MUTED, size=16),
@@ -628,24 +634,41 @@ def render_activity_grid(
             yanchor="middle",
         )
 
-    # Legend bottom (Less ... More)
-    # put squares as annotations
-    legend_y = -1.3
-    fig.add_annotation(x=int(n_weeks * 0.45), y=legend_y, text="Less", showarrow=False,
-                       font=dict(color=SPOTIFY_MUTED, size=16), xanchor="right")
-    lx0 = int(n_weeks * 0.45) + 1
+    # Legend bottom (Less ... More) — аккуратно, чтобы "Less" не налезал
+    legend_y = -1.2 * step
+    legend_x0 = (n_weeks * 0.45) * step
+
+    fig.add_annotation(
+        x=legend_x0,
+        y=legend_y,
+        text="Less",
+        showarrow=False,
+        font=dict(color=SPOTIFY_MUTED, size=16),
+        xanchor="right",
+        yanchor="middle",
+    )
+
+    lx0 = legend_x0 + 1.2 * step
     for i in range(5):
         fig.add_shape(
             type="rect",
-            x0=lx0 + i * 1.0 - 0.35,
-            x1=lx0 + i * 1.0 + 0.35,
-            y0=legend_y - 0.25,
-            y1=legend_y + 0.25,
-            line=dict(width=0),
+            x0=lx0 + i * step - half,
+            x1=lx0 + i * step + half,
+            y0=legend_y - half,
+            y1=legend_y + half,
+            line=dict(width=1, color=SPOTIFY_BG),
             fillcolor=palette[i],
         )
-    fig.add_annotation(x=lx0 + 5 * 1.0 + 0.6, y=legend_y, text="More", showarrow=False,
-                       font=dict(color=SPOTIFY_MUTED, size=16), xanchor="left")
+
+    fig.add_annotation(
+        x=lx0 + 5 * step + 0.4 * step,
+        y=legend_y,
+        text="More",
+        showarrow=False,
+        font=dict(color=SPOTIFY_MUTED, size=16),
+        xanchor="left",
+        yanchor="middle",
+    )
 
     fig.update_layout(
         paper_bgcolor=SPOTIFY_BG,
@@ -653,15 +676,15 @@ def render_activity_grid(
         margin=dict(l=60, r=20, t=30, b=60),
         xaxis=dict(
             visible=False,
-            range=[-2, n_weeks + 2],
+            range=[-3 * step, (n_weeks + 2) * step],
         ),
         yaxis=dict(
             visible=False,
-            range=[-2, 8],
+            range=[-2 * step, 8 * step],
             scaleanchor="x",   # squares stay squares
             scaleratio=1,
         ),
-        height=320,
+        height=360,
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
