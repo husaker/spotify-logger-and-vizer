@@ -590,7 +590,7 @@ def render_activity_grid(
     y_total = top_pad + grid_h + bottom_pad
 
     # ULTRA params
-    dpi = 340
+    dpi = 280
     scale = 0.52  # bigger => more pixels (heavier but crisp)
 
     fig_w = max(14.0, x_total * scale)
