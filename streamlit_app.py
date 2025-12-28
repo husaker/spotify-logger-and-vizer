@@ -475,15 +475,16 @@ def render_activity_grid(
     Metric: Plays / Minutes.
     """
     st.markdown("### Activity (this year)")
+
     metric = st.radio(
         "Heatmap metric",
         ["Plays", "Minutes"],
         horizontal=True,
         index=0,
-        key="activity_grid_metric",
+        key=f"activity_grid_metric_{year}",  # чтобы точно не конфликтовало
     )
 
-    # --- build base plays in local time
+    # --- base events in local time
     base = df_log[["played_at_utc", "Spotify ID"]].copy()
     base = base[base["played_at_utc"].notna()].copy()
     base["track_id"] = base["Spotify ID"].astype(str)
@@ -492,17 +493,29 @@ def render_activity_grid(
     base["played_local"] = base["played_at_utc"].dt.tz_convert(tz)
     base["day"] = base["played_local"].dt.date
     base["year"] = base["played_local"].dt.year
-
     base = base[base["year"] == year].copy()
+
     if base.empty:
         st.info("No activity data for this year yet.")
         return
 
-    # --- attach minutes (optional)
+    # --- daily aggregation
     if metric == "Minutes":
-        # df_ct already has duration_ms_i in your pipeline; just ensure it exists
-        df_ct_local = df_ct[["track_id", "duration_ms_i"]].copy()
+        # делаем df_ct самодостаточно: duration_ms_i, даже если ты его не посчитал выше
+        df_ct_local = df_ct.copy()
+        if "track_id" not in df_ct_local.columns:
+            df_ct_local["track_id"] = ""
         df_ct_local["track_id"] = df_ct_local["track_id"].astype(str)
+
+        if "duration_ms_i" not in df_ct_local.columns:
+            # попробуем взять duration_ms, иначе 0
+            if "duration_ms" in df_ct_local.columns:
+                df_ct_local["duration_ms_i"] = df_ct_local["duration_ms"].apply(lambda x: safe_int(x, 0))
+            else:
+                df_ct_local["duration_ms_i"] = 0
+
+        df_ct_local = df_ct_local[["track_id", "duration_ms_i"]].copy()
+
         base = base.merge(df_ct_local, on="track_id", how="left")
         base["minutes"] = (base["duration_ms_i"].fillna(0) / 60000.0).astype(float)
 
@@ -522,7 +535,7 @@ def render_activity_grid(
         value_title = "Plays"
         value_fmt = ",d"
 
-    # --- date span: Jan 1 -> today (if current year), else full year
+    # --- date span
     today_local = datetime.now(timezone.utc).astimezone(tz).date()
     start = date(year, 1, 1)
     end = today_local if year == today_local.year else date(year, 12, 31)
@@ -533,23 +546,22 @@ def render_activity_grid(
     grid["day_dt"] = pd.to_datetime(grid["day"])
     grid["dow"] = grid["day_dt"].dt.weekday  # Mon=0..Sun=6
 
-    # Week index starting from Monday of the week containing Jan 1
-    first_monday = start - timedelta(days=start.weekday())  # Monday on/before Jan 1
+    # week index from Monday on/before Jan 1
+    first_monday = start - timedelta(days=start.weekday())
     grid["week"] = grid["day"].apply(lambda d: (d - first_monday).days // 7)
 
-    # Month labels (x positions)
+    # month labels
     months = pd.date_range(start, end, freq="MS")
     month_df = pd.DataFrame({"month_start": months})
     month_df["label"] = month_df["month_start"].dt.strftime("%b")
     month_df["week"] = month_df["month_start"].dt.date.apply(lambda d: (d - first_monday).days // 7)
 
-    # --- bucket values into 5 levels like GitHub: 0 + 4 bins by quantiles
+    # --- levels like GitHub (0 + 4 bins)
     nonzero = grid.loc[grid["value"] > 0, "value"].astype(float)
     if len(nonzero) >= 10:
         q1, q2, q3, q4 = nonzero.quantile([0.25, 0.50, 0.75, 0.90]).tolist()
         bins = [0, q1, q2, q3, q4]
     else:
-        # fallback for tiny data
         bins = [0, 1, 3, 6, 10]
 
     def to_level(v: float) -> int:
@@ -565,7 +577,6 @@ def render_activity_grid(
 
     grid["level"] = grid["value"].apply(to_level).astype(int)
 
-    # Colors: 0 = border-ish, then 4 green intensities
     palette = [
         SPOTIFY_BORDER,
         _hex_with_alpha(SPOTIFY_GREEN, 0.25),
@@ -573,13 +584,11 @@ def render_activity_grid(
         _hex_with_alpha(SPOTIFY_GREEN, 0.65),
         SPOTIFY_GREEN,
     ]
-
     color_scale = alt.Scale(domain=[0, 1, 2, 3, 4], range=palette)
 
-    # Show only Mon/Wed/Fri labels like GitHub
     dow_axis = alt.Axis(
         title=None,
-        values=[0, 2, 4],
+        values=[0, 2, 4],  # Mon/Wed/Fri
         labelExpr="datum.value == 0 ? 'Mon' : datum.value == 2 ? 'Wed' : 'Fri'",
         labelColor=SPOTIFY_MUTED,
         tickColor=SPOTIFY_BORDER,
@@ -601,12 +610,11 @@ def render_activity_grid(
         .properties(height=120, background=SPOTIFY_BG)
     )
 
-    # Month labels on top
     month_labels = (
         alt.Chart(month_df)
         .mark_text(align="left", baseline="middle", dy=-6)
         .encode(
-            x=alt.X("week:O", title=None),
+            x=alt.X("week:O", title=None, axis=alt.Axis(labels=False, ticks=False, domain=False)),
             y=alt.value(0),
             text="label:N",
         )
@@ -616,11 +624,7 @@ def render_activity_grid(
     chart = (
         alt.vconcat(month_labels, cells, spacing=0)
         .configure_view(strokeOpacity=0)
-        .configure_axis(
-            grid=False,
-            labelColor=SPOTIFY_MUTED,
-            titleColor=SPOTIFY_MUTED,
-        )
+        .configure_axis(grid=False, labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
     )
 
     st.altair_chart(chart, width="stretch")
@@ -1128,20 +1132,6 @@ try:
 except Exception:
     tz = timezone.utc
 
-# -----------------------------
-# Activity grid (GitHub-like) - current calendar year (full log, not filtered range)
-# -----------------------------
-current_year = datetime.now(timezone.utc).astimezone(tz).year  # local year
-
-render_activity_grid(
-    df_log=df_log,
-    df_ct=df_ct,
-    tz=tz,
-    year=current_year,
-)
-
-st.divider()
-
 start_dt = datetime.combine(date_from, time.min).replace(tzinfo=tz).astimezone(timezone.utc)
 end_dt = datetime.combine(date_to, time.max).replace(tzinfo=tz).astimezone(timezone.utc)
 
@@ -1207,6 +1197,15 @@ with k4:
 with k5:
     active_days_sel = df["played_at_utc"].dt.date.nunique()
     kpi_card("Active days", str(active_days_sel))
+
+# Activity grid
+current_year_local = datetime.now(timezone.utc).astimezone(tz).year
+render_activity_grid(
+    df_log=df_log,   # важно: full log, чтобы год был полный
+    df_ct=df_ct,     # уже нормализован
+    tz=tz,
+    year=current_year_local,
+)
 
 st.divider()
 
