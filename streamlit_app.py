@@ -1199,10 +1199,12 @@ with k5:
     kpi_card("Active days", str(active_days_sel))
 
 # Activity grid
+st.markdown("")  # маленький "разрыв", чтобы точно было видно блок
+
 current_year_local = datetime.now(timezone.utc).astimezone(tz).year
 render_activity_grid(
-    df_log=df_log,   # важно: full log, чтобы год был полный
-    df_ct=df_ct,     # уже нормализован
+    df_log=df_log,
+    df_ct=df_ct,      # можно даже без duration_ms_i — функция сама сделает safe_int
     tz=tz,
     year=current_year_local,
 )
