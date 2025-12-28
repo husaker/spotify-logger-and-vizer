@@ -11,7 +11,6 @@ from typing import Any
 import altair as alt
 import gspread
 import pandas as pd
-import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
 from dateutil import parser as dtparser
@@ -471,12 +470,15 @@ def render_activity_grid(
     tz,  # ZoneInfo | timezone.utc
 ) -> None:
     """
-    GitHub-like activity grid for the last 365 days (rolling window).
+    Ultra-crisp GitHub-like activity grid for the last 365 days (rolling window).
     Each cell = day. Columns = weeks (Mon-start), rows = day of week.
     Metric: Plays only.
-    Coloring: percentile-based (within active days only), 0 + 4 levels.
-    Legend is placed below (center).
+    Coloring: percentile-based (active days only), 0 + 4 levels.
+    Legend: below, centered.
+    Rendering: square cells + high DPI.
     """
+
+    from datetime import datetime, timedelta, timezone
 
     st.markdown("### Activity (last 365 days)")
 
@@ -485,15 +487,13 @@ def render_activity_grid(
         return
 
     # -----------------------------
-    # Build base plays in local time
+    # Base plays in local time
     # -----------------------------
     base = df_log[["played_at_utc", "Spotify ID"]].copy()
     base = base[base["played_at_utc"].notna()].copy()
-
     base["track_id"] = base["Spotify ID"].astype(str).fillna("")
     base = base[base["track_id"].str.len() > 0].copy()
 
-    # Ensure tz-aware + convert to local tz
     try:
         base["played_local"] = base["played_at_utc"].dt.tz_convert(tz)
     except Exception:
@@ -504,8 +504,7 @@ def render_activity_grid(
     base["day"] = base["played_local"].dt.date
 
     # -----------------------------
-    # Rolling 365-day window (inclusive)
-    # end = today in local tz
+    # Rolling 365 days
     # -----------------------------
     today_local = datetime.now(timezone.utc).astimezone(tz).date()
     end = today_local
@@ -518,14 +517,12 @@ def render_activity_grid(
 
     daily = base.groupby("day", dropna=False).size().reset_index(name="value")  # plays per day
 
-    # Full grid: every day in range
     all_days = pd.DataFrame({"day": pd.date_range(start, end, freq="D").date})
-    grid = all_days.merge(daily, on="day", how="left").fillna({"value": 0.0})
-    grid["value"] = grid["value"].astype(float)
+    grid = all_days.merge(daily, on="day", how="left").fillna({"value": 0})
+    grid["value"] = grid["value"].astype(int)
 
     # -----------------------------
     # Map day -> (week_index, weekday)
-    # Weeks start Monday, first column = week of start (Monday on/before start)
     # -----------------------------
     first_monday = start - timedelta(days=start.weekday())  # Monday on/before start
     grid["week"] = grid["day"].apply(lambda d: (d - first_monday).days // 7).astype(int)
@@ -534,19 +531,31 @@ def render_activity_grid(
 
     # -----------------------------
     # Percentile-based levels: 0 + 4 bins on active days only
-    # stable even with repeated values
     # -----------------------------
     grid["level"] = 0
     pos_mask = grid["value"] > 0
-    pos_vals = grid.loc[pos_mask, "value"]
 
-    if not pos_vals.empty:
-        pct_rank = pos_vals.rank(pct=True, method="average")  # (0..1]
-        levels = np.ceil(pct_rank * 4).astype(int).clip(1, 4)
-        grid.loc[pos_mask, "level"] = levels
+    if pos_mask.any():
+        pos_vals = grid.loc[pos_mask, "value"]
+        try:
+            grid.loc[pos_mask, "level"] = (
+                pd.qcut(pos_vals, q=4, labels=[1, 2, 3, 4], duplicates="drop").astype(int)
+            )
+            if grid.loc[pos_mask, "level"].nunique() < 4:
+                raise ValueError("Too few unique bins after qcut")
+        except Exception:
+            pct = pos_vals.rank(pct=True, method="average")
+
+            def _ceil(x: float) -> int:
+                xi = int(x)
+                return xi if x == xi else xi + 1
+
+            tmp = (pct * 4.0)
+            levels = tmp.apply(_ceil).clip(lower=1, upper=4).astype(int)
+            grid.loc[pos_mask, "level"] = levels
 
     # -----------------------------
-    # Colors (Spotify-ish) with alpha for intermediate levels
+    # Colors (Spotify-ish)
     # -----------------------------
     def rgba(hex_color: str, a: float) -> tuple[float, float, float, float]:
         h = hex_color.lstrip("#")
@@ -564,133 +573,152 @@ def render_activity_grid(
     }
 
     # -----------------------------
-    # Draw
+    # Draw (ultra-crisp)
     # -----------------------------
+    # Geometry
     cell = 1.0
     gap = 0.18
 
-    # Canvas sizing
     grid_w = n_weeks * (cell + gap)
     grid_h = 7 * (cell + gap)
 
-    # Give room for left labels + top months + bottom legend
-    left_pad = 3.2
-    top_pad = 1.6
-    bottom_pad = 2.2
+    left_pad = 3.4
+    top_pad = 1.7
+    bottom_pad = 2.9  # space for legend below
 
-    # Figure size (auto-ish)
-    width_in = max(12, (grid_w + left_pad + 2.0) / 6.2)
-    height_in = 3.2
+    x_total = left_pad + grid_w + 0.8
+    y_total = top_pad + grid_h + bottom_pad
 
-    fig, ax = plt.subplots(figsize=(width_in, height_in))
-    fig.patch.set_facecolor(SPOTIFY_BG)
-    ax.set_facecolor(SPOTIFY_BG)
+    # ULTRA params
+    dpi = 340
+    scale = 0.52  # bigger => more pixels (heavier but crisp)
 
-    # Cells
-    for _, r in grid.iterrows():
-        x = left_pad + r["week"] * (cell + gap)
-        y = top_pad + r["dow"] * (cell + gap)
-        ax.add_patch(
-            Rectangle(
-                (x, y),
-                cell,
-                cell,
-                linewidth=0,
-                facecolor=palette[int(r["level"])],
+    fig_w = max(14.0, x_total * scale)
+    fig_h = max(4.3, y_total * scale)
+
+    # Force high DPI in backend too
+    old_fig_dpi = plt.rcParams.get("figure.dpi", None)
+    old_save_dpi = plt.rcParams.get("savefig.dpi", None)
+    plt.rcParams["figure.dpi"] = dpi
+    plt.rcParams["savefig.dpi"] = dpi
+
+    try:
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+        fig.patch.set_facecolor(SPOTIFY_BG)
+        ax.set_facecolor(SPOTIFY_BG)
+
+        # Cells
+        for _, r in grid.iterrows():
+            x = left_pad + r["week"] * (cell + gap)
+            y = top_pad + r["dow"] * (cell + gap)
+            ax.add_patch(
+                Rectangle(
+                    (x, y),
+                    cell,
+                    cell,
+                    linewidth=0,
+                    facecolor=palette[int(r["level"])],
+                    antialiased=True,
+                )
             )
-        )
 
-    # Layout / bounds
-    ax.set_xlim(0, left_pad + grid_w + 0.8)
-    ax.set_ylim(top_pad + grid_h + bottom_pad, 0)  # invert y
-    ax.axis("off")
+        # Layout + square cells
+        ax.set_xlim(0, x_total)
+        ax.set_ylim(y_total, 0)  # invert y
+        ax.axis("off")
+        ax.set_aspect("equal", adjustable="box")
 
-    # Left labels (Mon/Wed/Fri) aligned to rows
-    label_map = {0: "Mon", 2: "Wed", 4: "Fri"}
-    for dow, txt in label_map.items():
-        y = top_pad + dow * (cell + gap) + cell * 0.72
+        # Left labels (Mon/Wed/Fri)
+        label_map = {0: "Mon", 2: "Wed", 4: "Fri"}
+        for dow, txt in label_map.items():
+            y = top_pad + dow * (cell + gap) + cell * 0.72
+            ax.text(
+                left_pad - 1.2,
+                y,
+                txt,
+                color=SPOTIFY_MUTED,
+                fontsize=14,
+                va="center",
+                ha="right",
+            )
+
+        # Month labels
+        month_starts = pd.date_range(start, end, freq="MS").date
+        used_weeks = set()
+        for m in month_starts:
+            w = (m - first_monday).days // 7
+            if w in used_weeks:
+                continue
+            used_weeks.add(w)
+            x = left_pad + w * (cell + gap)
+            ax.text(
+                x,
+                top_pad - 0.82,
+                m.strftime("%b"),
+                color=SPOTIFY_MUTED,
+                fontsize=15,
+                ha="left",
+                va="center",
+            )
+
+        # Legend BELOW centered
+        legend_y = top_pad + grid_h + 1.30
+
+        legend_cells = 5
+        legend_cells_w = legend_cells * cell + (legend_cells - 1) * gap
+        less_w = 1.55
+        more_w = 1.55
+        pad = 0.85
+
+        total_legend_w = less_w + pad + legend_cells_w + pad + more_w
+        center_x = left_pad + grid_w / 2.0
+        legend_x0 = center_x - total_legend_w / 2.0
+
         ax.text(
-            left_pad - 1.1,
-            y,
-            txt,
+            legend_x0 + less_w,
+            legend_y + cell * 0.55,
+            "Less",
             color=SPOTIFY_MUTED,
-            fontsize=11,
-            va="center",
+            fontsize=15,
             ha="right",
+            va="center",
         )
 
-    # Month labels on top (for the 365-day span)
-    month_starts = pd.date_range(start, end, freq="MS").date
-    used_weeks = set()
-    for m in month_starts:
-        w = (m - first_monday).days // 7
-        if w in used_weeks:
-            continue
-        used_weeks.add(w)
-        x = left_pad + w * (cell + gap)
+        cells_x0 = legend_x0 + less_w + pad
+        for i in range(5):
+            ax.add_patch(
+                Rectangle(
+                    (cells_x0 + i * (cell + gap), legend_y),
+                    cell,
+                    cell,
+                    linewidth=0,
+                    facecolor=palette[i],
+                    antialiased=True,
+                )
+            )
+
         ax.text(
-            x,
-            top_pad - 0.75,
-            m.strftime("%b"),
+            cells_x0 + legend_cells_w + pad,
+            legend_y + cell * 0.55,
+            "More",
             color=SPOTIFY_MUTED,
-            fontsize=12,
+            fontsize=15,
             ha="left",
             va="center",
         )
 
-    # -----------------------------
-    # Legend BELOW (centered), no overlap
-    # -----------------------------
-    legend_y = top_pad + grid_h + 1.0
+        # Avoid cropping text
+        fig.subplots_adjust(left=0.01, right=0.995, top=0.975, bottom=0.07)
 
-    # total legend width in "data units"
-    legend_cells = 5
-    legend_cells_w = legend_cells * cell + (legend_cells - 1) * gap
-    less_w = 1.3  # approx text width in data-units (tuned)
-    more_w = 1.3
-    pad = 0.7
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
 
-    total_legend_w = less_w + pad + legend_cells_w + pad + more_w
-    center_x = left_pad + grid_w / 2.0
-    legend_x0 = center_x - total_legend_w / 2.0
-
-    # "Less"
-    ax.text(
-        legend_x0 + less_w,
-        legend_y + cell * 0.55,
-        "Less",
-        color=SPOTIFY_MUTED,
-        fontsize=12,
-        ha="right",
-        va="center",
-    )
-
-    # cells
-    cells_x0 = legend_x0 + less_w + pad
-    for i in range(5):
-        ax.add_patch(
-            Rectangle(
-                (cells_x0 + i * (cell + gap), legend_y),
-                cell,
-                cell,
-                linewidth=0,
-                facecolor=palette[i],
-            )
-        )
-
-    # "More"
-    ax.text(
-        cells_x0 + legend_cells_w + pad,
-        legend_y + cell * 0.55,
-        "More",
-        color=SPOTIFY_MUTED,
-        fontsize=12,
-        ha="left",
-        va="center",
-    )
-
-    st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
+    finally:
+        # restore rcParams
+        if old_fig_dpi is not None:
+            plt.rcParams["figure.dpi"] = old_fig_dpi
+        if old_save_dpi is not None:
+            plt.rcParams["savefig.dpi"] = old_save_dpi
 
 
 # -----------------------------
