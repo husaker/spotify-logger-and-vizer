@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import re
-from datetime import datetime, timedelta, timezone, time
+from datetime import datetime, timedelta, timezone, time, date
 from typing import Any
 
 import altair as alt
@@ -451,6 +451,179 @@ def x_bucket(grain: str) -> alt.X:
 
 def period_tooltip():
     return alt.Tooltip("bucket_dt:T", title="Period")
+
+
+def _hex_with_alpha(hex_color: str, alpha: float) -> str:
+    """Convert #RRGGBB to rgba(r,g,b,a) for Vega/Altair."""
+    hex_color = hex_color.lstrip("#")
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def render_activity_grid(
+    *,
+    df_log: pd.DataFrame,
+    df_ct: pd.DataFrame,
+    tz: ZoneInfo,
+    year: int,
+) -> None:
+    """
+    GitHub-like activity grid for the given calendar year (Jan 1 -> today if current year).
+    Each cell = day. Columns = weeks (Mon-start), rows = day of week.
+    Metric: Plays / Minutes.
+    """
+    st.markdown("### Activity (this year)")
+    metric = st.radio(
+        "Heatmap metric",
+        ["Plays", "Minutes"],
+        horizontal=True,
+        index=0,
+        key="activity_grid_metric",
+    )
+
+    # --- build base plays in local time
+    base = df_log[["played_at_utc", "Spotify ID"]].copy()
+    base = base[base["played_at_utc"].notna()].copy()
+    base["track_id"] = base["Spotify ID"].astype(str)
+    base = base[base["track_id"].str.len() > 0].copy()
+
+    base["played_local"] = base["played_at_utc"].dt.tz_convert(tz)
+    base["day"] = base["played_local"].dt.date
+    base["year"] = base["played_local"].dt.year
+
+    base = base[base["year"] == year].copy()
+    if base.empty:
+        st.info("No activity data for this year yet.")
+        return
+
+    # --- attach minutes (optional)
+    if metric == "Minutes":
+        # df_ct already has duration_ms_i in your pipeline; just ensure it exists
+        df_ct_local = df_ct[["track_id", "duration_ms_i"]].copy()
+        df_ct_local["track_id"] = df_ct_local["track_id"].astype(str)
+        base = base.merge(df_ct_local, on="track_id", how="left")
+        base["minutes"] = (base["duration_ms_i"].fillna(0) / 60000.0).astype(float)
+
+        daily = (
+            base.groupby("day", dropna=False)
+            .agg(value=("minutes", "sum"))
+            .reset_index()
+        )
+        value_title = "Minutes"
+        value_fmt = ".1f"
+    else:
+        daily = (
+            base.groupby("day", dropna=False)
+            .size()
+            .reset_index(name="value")
+        )
+        value_title = "Plays"
+        value_fmt = ",d"
+
+    # --- date span: Jan 1 -> today (if current year), else full year
+    today_local = datetime.now(timezone.utc).astimezone(tz).date()
+    start = date(year, 1, 1)
+    end = today_local if year == today_local.year else date(year, 12, 31)
+
+    all_days = pd.DataFrame({"day": pd.date_range(start, end, freq="D").date})
+    grid = all_days.merge(daily, on="day", how="left").fillna({"value": 0})
+
+    grid["day_dt"] = pd.to_datetime(grid["day"])
+    grid["dow"] = grid["day_dt"].dt.weekday  # Mon=0..Sun=6
+
+    # Week index starting from Monday of the week containing Jan 1
+    first_monday = start - timedelta(days=start.weekday())  # Monday on/before Jan 1
+    grid["week"] = grid["day"].apply(lambda d: (d - first_monday).days // 7)
+
+    # Month labels (x positions)
+    months = pd.date_range(start, end, freq="MS")
+    month_df = pd.DataFrame({"month_start": months})
+    month_df["label"] = month_df["month_start"].dt.strftime("%b")
+    month_df["week"] = month_df["month_start"].dt.date.apply(lambda d: (d - first_monday).days // 7)
+
+    # --- bucket values into 5 levels like GitHub: 0 + 4 bins by quantiles
+    nonzero = grid.loc[grid["value"] > 0, "value"].astype(float)
+    if len(nonzero) >= 10:
+        q1, q2, q3, q4 = nonzero.quantile([0.25, 0.50, 0.75, 0.90]).tolist()
+        bins = [0, q1, q2, q3, q4]
+    else:
+        # fallback for tiny data
+        bins = [0, 1, 3, 6, 10]
+
+    def to_level(v: float) -> int:
+        if v <= 0:
+            return 0
+        if v <= bins[1]:
+            return 1
+        if v <= bins[2]:
+            return 2
+        if v <= bins[3]:
+            return 3
+        return 4
+
+    grid["level"] = grid["value"].apply(to_level).astype(int)
+
+    # Colors: 0 = border-ish, then 4 green intensities
+    palette = [
+        SPOTIFY_BORDER,
+        _hex_with_alpha(SPOTIFY_GREEN, 0.25),
+        _hex_with_alpha(SPOTIFY_GREEN, 0.45),
+        _hex_with_alpha(SPOTIFY_GREEN, 0.65),
+        SPOTIFY_GREEN,
+    ]
+
+    color_scale = alt.Scale(domain=[0, 1, 2, 3, 4], range=palette)
+
+    # Show only Mon/Wed/Fri labels like GitHub
+    dow_axis = alt.Axis(
+        title=None,
+        values=[0, 2, 4],
+        labelExpr="datum.value == 0 ? 'Mon' : datum.value == 2 ? 'Wed' : 'Fri'",
+        labelColor=SPOTIFY_MUTED,
+        tickColor=SPOTIFY_BORDER,
+        domainColor=SPOTIFY_BORDER,
+    )
+
+    cells = (
+        alt.Chart(grid)
+        .mark_rect(cornerRadius=2)
+        .encode(
+            x=alt.X("week:O", title=None, axis=alt.Axis(labels=False, ticks=False, domain=False)),
+            y=alt.Y("dow:O", axis=dow_axis),
+            color=alt.Color("level:O", scale=color_scale, legend=None),
+            tooltip=[
+                alt.Tooltip("day_dt:T", title="Date"),
+                alt.Tooltip("value:Q", title=value_title, format=value_fmt),
+            ],
+        )
+        .properties(height=120, background=SPOTIFY_BG)
+    )
+
+    # Month labels on top
+    month_labels = (
+        alt.Chart(month_df)
+        .mark_text(align="left", baseline="middle", dy=-6)
+        .encode(
+            x=alt.X("week:O", title=None),
+            y=alt.value(0),
+            text="label:N",
+        )
+        .properties(height=20)
+    ).configure_text(color=SPOTIFY_MUTED, fontSize=12)
+
+    chart = (
+        alt.vconcat(month_labels, cells, spacing=0)
+        .configure_view(strokeOpacity=0)
+        .configure_axis(
+            grid=False,
+            labelColor=SPOTIFY_MUTED,
+            titleColor=SPOTIFY_MUTED,
+        )
+    )
+
+    st.altair_chart(chart, width="stretch")
 
 # -----------------------------
 # Header
@@ -976,6 +1149,19 @@ df_calb["album_id"] = df_calb.get("album_id", "").astype(str)
 
 df_ca = df_ca.copy()
 df_ca["artist_id"] = df_ca.get("artist_id", "").astype(str)
+
+# -----------------------------
+# Activity grid (GitHub-like) - current calendar year
+# -----------------------------
+today_utc = datetime.now(timezone.utc).date()
+current_year = datetime.now(timezone.utc).astimezone(tz).year  # local year
+
+render_activity_grid(
+    df_log=df_log,
+    df_ct=df_ct,
+    tz=tz,
+    year=current_year,
+)
 
 # Enrich plays with cache info
 df = df.rename(columns={"Spotify ID": "track_id"}).copy()
