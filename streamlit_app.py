@@ -1128,6 +1128,20 @@ try:
 except Exception:
     tz = timezone.utc
 
+# -----------------------------
+# Activity grid (GitHub-like) - current calendar year (full log, not filtered range)
+# -----------------------------
+current_year = datetime.now(timezone.utc).astimezone(tz).year  # local year
+
+render_activity_grid(
+    df_log=df_log,
+    df_ct=df_ct,
+    tz=tz,
+    year=current_year,
+)
+
+st.divider()
+
 start_dt = datetime.combine(date_from, time.min).replace(tzinfo=tz).astimezone(timezone.utc)
 end_dt = datetime.combine(date_to, time.max).replace(tzinfo=tz).astimezone(timezone.utc)
 
@@ -1149,19 +1163,6 @@ df_calb["album_id"] = df_calb.get("album_id", "").astype(str)
 
 df_ca = df_ca.copy()
 df_ca["artist_id"] = df_ca.get("artist_id", "").astype(str)
-
-# -----------------------------
-# Activity grid (GitHub-like) - current calendar year
-# -----------------------------
-today_utc = datetime.now(timezone.utc).date()
-current_year = datetime.now(timezone.utc).astimezone(tz).year  # local year
-
-render_activity_grid(
-    df_log=df_log,
-    df_ct=df_ct,
-    tz=tz,
-    year=current_year,
-)
 
 # Enrich plays with cache info
 df = df.rename(columns={"Spotify ID": "track_id"}).copy()
