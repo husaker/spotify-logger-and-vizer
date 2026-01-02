@@ -476,8 +476,6 @@ def render_activity_grid(
     Plotly version (hover per day).
     Metric: Plays only.
     Coloring: 0 + 4 levels via percentiles on active days.
-
-    Optimized: uses single Scattergl trace (no per-day shapes).
     """
     import numpy as np
     import pandas as pd
@@ -496,6 +494,7 @@ def render_activity_grid(
     base["track_id"] = base["Spotify ID"].astype(str).fillna("")
     base = base[base["track_id"].str.len() > 0].copy()
 
+    # local time
     try:
         base["played_local"] = base["played_at_utc"].dt.tz_convert(tz)
     except Exception:
@@ -525,15 +524,13 @@ def render_activity_grid(
     grid = grid.merge(daily, on="day", how="left").fillna({"plays": 0})
     grid["plays"] = grid["plays"].astype(int)
 
-    # map day -> week index (Mon-based) and dow
+    # geometry helpers
     first_monday = start - timedelta(days=start.weekday())
-    grid["day_ts"] = pd.to_datetime(grid["day"])  # naive
+    grid["day_ts"] = pd.to_datetime(grid["day"])  # naive timestamp
     grid["day_name"] = grid["day_ts"].dt.day_name()
 
-    # week index & dow
     grid["dow"] = grid["day_ts"].dt.weekday.astype(int)  # Mon=0..Sun=6
-
-    first_monday_ts = pd.Timestamp(first_monday)  # naive timestamp
+    first_monday_ts = pd.Timestamp(first_monday)
     grid["week"] = ((grid["day_ts"] - first_monday_ts).dt.days // 7).astype(int)
 
     n_weeks = int(grid["week"].max()) + 1
@@ -568,14 +565,10 @@ def render_activity_grid(
         4: rgba(SPOTIFY_GREEN, 1.00),
     }
 
-    # --- grid geometry in "px-like" units
     step = cell_px + gap_px
-
-    # convert grid coords to plot coords (invert y so Mon is top)
     grid["x"] = grid["week"] * step
-    grid["y"] = (6 - grid["dow"]) * step
+    grid["y"] = (6 - grid["dow"]) * step  # Mon at top
 
-    # --- SINGLE Scattergl trace (squares) + hover via customdata
     colors = grid["level"].map(lambda v: palette[int(v)]).tolist()
 
     customdata = np.stack(
@@ -587,16 +580,31 @@ def render_activity_grid(
         axis=1,
     )
 
+    # Rounded square marker via SVG path (works with go.Scatter)
+    # k closer to 1 => smaller rounding (subtle)
+    k = 0.90
+    rounded_square = (
+        f"path://M {-k},-1 "
+        f"L {k},-1 "
+        f"Q 1,-1 1,{-k} "
+        f"L 1,{k} "
+        f"Q 1,1 {k},1 "
+        f"L {-k},1 "
+        f"Q -1,1 -1,{k} "
+        f"L -1,{-k} "
+        f"Q -1,-1 {-k},-1 Z"
+    )
+
     fig = go.Figure(
-        go.Scattergl(
+        go.Scatter(
             x=grid["x"],
             y=grid["y"],
             mode="markers",
             marker=dict(
-                symbol="square",
+                symbol=rounded_square,
                 size=cell_px,
                 color=colors,
-                line=dict(width=1, color=SPOTIFY_BG),  # divider like before
+                line=dict(width=1, color=SPOTIFY_BG),  # thin divider
             ),
             customdata=customdata,
             hovertemplate="<b>%{customdata[0]}</b> (%{customdata[1]})<br>"
@@ -607,7 +615,7 @@ def render_activity_grid(
     # Month labels (top)
     month_starts = pd.date_range(start, end, freq="MS").date
     used = set()
-    month_y = 7.15 * step  # чуть выше первой строки
+    month_y = 7.15 * step
     for m in month_starts:
         w = (m - first_monday).days // 7
         if w in used:
@@ -636,14 +644,14 @@ def render_activity_grid(
             yanchor="middle",
         )
 
-    # --- Tight ranges to avoid whitespace
+    # Tight ranges (no scaleanchor => no huge whitespace)
     y_min = -0.45 * step
     y_max = month_y + 0.65 * step
 
     fig.update_layout(
         paper_bgcolor=SPOTIFY_BG,
         plot_bgcolor=SPOTIFY_BG,
-        margin=dict(l=60, r=20, t=6, b=6),
+        margin=dict(l=60, r=20, t=0, b=0),
         xaxis=dict(
             visible=False,
             range=[-3 * step, (n_weeks + 2) * step],
@@ -652,11 +660,9 @@ def render_activity_grid(
         yaxis=dict(
             visible=False,
             range=[y_min, y_max],
-            scaleanchor="x",
-            scaleratio=1,
             fixedrange=True,
         ),
-        height=280,
+        height=210,
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
@@ -1078,11 +1084,11 @@ with st.sidebar:
 
     min_data_date = st.session_state.get("min_data_date")  # may be None until we load df_log once
 
-    if preset == "This year":
+    if preset == "All time":
         default_from = datetime(current_year, 1, 1, tzinfo=timezone.utc).date()
         default_to = today_utc
 
-    elif preset == "All time":
+    elif preset == "This year":
         default_from = min_data_date or datetime(current_year, 1, 1, tzinfo=timezone.utc).date()
         default_to = today_utc
 
