@@ -640,7 +640,7 @@ def render_activity_grid(
     fig.update_layout(
         paper_bgcolor=SPOTIFY_BG,
         plot_bgcolor=SPOTIFY_BG,
-        margin=dict(l=54, r=16, t=26, b=8),
+        margin=dict(l=58, r=16, t=26, b=8),
         height=height,
         xaxis=dict(
             visible=False,
@@ -1241,8 +1241,8 @@ st.divider()
 # -----------------------------
 # Tabs
 # -----------------------------
-tab_artists, tab_tracks, tab_albums, tab_monthly, tab_genres, tab_fingerprint, tab_new_repeat = st.tabs(
-    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Monthly avg", "Top 5 Genres", "Listening fingerprint", "New vs Repeat"]
+tab_artists, tab_tracks, tab_albums, tab_weekly, tab_genres, tab_fingerprint, tab_new_repeat = st.tabs(
+    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Weekly avg", "Top 5 Genres", "Listening fingerprint", "New vs Repeat"]
 )
 
 # ===== Top 5 Artists =====
@@ -1343,66 +1343,78 @@ with tab_albums:
         )
     render_top_cards(items, cols=5)
 
-# ===== Monthly avg (avg per active day) + cover markers on the line =====
-with tab_monthly:
-    st.markdown("### Average plays per active day by month")
+# ===== Weekly avg (avg per active day) + cover markers on the line =====
+with tab_weekly:
+    st.markdown("### Average plays per active day by week")
 
-    dfm = df.copy()
-    dfm["month"] = dfm["played_at_utc"].dt.to_period("M").dt.to_timestamp()
+    dfw = df.copy()
+
+    # Week bucket in LOCAL time (week starts Monday)
+    played_local_naive = dfw["played_at_utc"].dt.tz_convert(tz).dt.tz_localize(None)
+    dfw["week"] = played_local_naive.dt.to_period("W-MON").dt.start_time  # Monday date
 
     active_days = (
-        dfm.groupby("month")["played_at_utc"]
-        .apply(lambda s: s.dt.date.nunique())
+        dfw.groupby("week")["played_at_utc"]
+        .apply(lambda s: s.dt.tz_convert(tz).dt.date.nunique())
         .reset_index(name="active_days")
     )
 
-    month_agg = (
-        dfm.groupby("month")
+    week_agg = (
+        dfw.groupby("week")
         .agg(plays=("track_id", "count"), minutes=("minutes", "sum"))
         .reset_index()
-        .sort_values("month")
+        .sort_values("week")
     )
 
-    month_agg = month_agg.merge(active_days, on="month", how="left")
-    month_agg["active_days"] = month_agg["active_days"].fillna(0).astype(int)
+    week_agg = week_agg.merge(active_days, on="week", how="left")
+    week_agg["active_days"] = week_agg["active_days"].fillna(0).astype(int)
 
-    month_agg["avg_tracks_per_active_day"] = month_agg.apply(
+    week_agg["avg_tracks_per_active_day"] = week_agg.apply(
         lambda r: (r["plays"] / r["active_days"]) if r["active_days"] > 0 else 0.0,
         axis=1,
     )
-    month_agg["avg_minutes_per_active_day"] = month_agg.apply(
+    week_agg["avg_minutes_per_active_day"] = week_agg.apply(
         lambda r: (r["minutes"] / r["active_days"]) if r["active_days"] > 0 else 0.0,
         axis=1,
     )
 
+    # Top album per week (by plays)
     top_album = (
-        dfm.groupby(["month", "album_id", "album_name"])
+        dfw.groupby(["week", "album_id", "album_name"])
         .size()
         .reset_index(name="plays_album")
-        .sort_values(["month", "plays_album"], ascending=[True, False])
+        .sort_values(["week", "plays_album"], ascending=[True, False])
     )
-    top_album = top_album.groupby("month").head(1)
+    top_album = top_album.groupby("week").head(1)
 
     cover_by_album = (
-        dfm.groupby("album_id")["album_cover_best"]
+        dfw.groupby("album_id")["album_cover_best"]
         .agg(lambda s: next((x for x in s if isinstance(x, str) and x.strip()), ""))
         .to_dict()
     )
     top_album["album_cover_url"] = top_album["album_id"].map(cover_by_album)
 
-    plays_m = month_agg.merge(top_album[["month", "album_name", "album_cover_url"]], on="month", how="left")
-    plays_m["month_str"] = plays_m["month"].dt.strftime("%Y-%m")
+    plays_w = week_agg.merge(top_album[["week", "album_name", "album_cover_url"]], on="week", how="left")
+
+    # X as ORDINAL to avoid Vega time ticks ("12 PM")
+    plays_w["week_dt"] = pd.to_datetime(plays_w["week"]).dt.normalize()
+    plays_w["week_str"] = plays_w["week_dt"].dt.strftime("%d.%m.%Y")  # Monday date label
 
     tooltip_main = [
-        alt.Tooltip("month_str:N", title="Month"),
+        alt.Tooltip("week_str:N", title="Week (Mon)"),
         alt.Tooltip("avg_tracks_per_active_day:Q", title="Avg tracks / active day", format=".2f"),
         alt.Tooltip("avg_minutes_per_active_day:Q", title="Avg minutes / active day", format=".1f"),
         alt.Tooltip("plays:Q", title="Tracks played (total)", format=",d"),
         alt.Tooltip("active_days:Q", title="Active days", format=",d"),
     ]
 
-    base = alt.Chart(plays_m).encode(
-        x=alt.X("month_str:N", title=None),
+    base = alt.Chart(plays_w).encode(
+        x=alt.X(
+            "week_dt:O",
+            title=None,
+            sort=alt.SortField("week_dt", order="ascending"),
+            axis=alt.Axis(labelAngle=-45, labelOverlap="greedy"),
+        )
     )
 
     line = base.mark_line(color=SPOTIFY_GREEN).encode(
@@ -1410,23 +1422,23 @@ with tab_monthly:
         tooltip=tooltip_main,
     )
 
-    points = base.mark_point(color=SPOTIFY_GREEN, size=70).encode(
+    points = base.mark_point(color=SPOTIFY_GREEN, size=55).encode(
         y="avg_tracks_per_active_day:Q",
         tooltip=tooltip_main,
     )
 
-    img_df = plays_m[plays_m["album_cover_url"].fillna("").astype(str).str.len() > 0].copy()
+    img_df = plays_w[plays_w["album_cover_url"].fillna("").astype(str).str.len() > 0].copy()
 
     tooltip_cover = [
-        alt.Tooltip("month_str:N", title="Month"),
+        alt.Tooltip("week_str:N", title="Week (Mon)"),
         alt.Tooltip("album_name:N", title="Top album"),
         alt.Tooltip("avg_tracks_per_active_day:Q", title="Avg tracks / active day", format=".2f"),
         alt.Tooltip("plays:Q", title="Tracks played (total)", format=",d"),
         alt.Tooltip("active_days:Q", title="Active days", format=",d"),
     ]
 
-    covers = alt.Chart(img_df).mark_image(width=42, height=42, dy=-32).encode(
-        x="month_str:N",
+    covers = alt.Chart(img_df).mark_image(width=34, height=34, dy=-26).encode(
+        x="week_dt:O",
         y="avg_tracks_per_active_day:Q",
         url="album_cover_url:N",
         tooltip=tooltip_cover,
