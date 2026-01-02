@@ -473,7 +473,9 @@ def render_activity_grid(
 ) -> None:
     """
     Activity grid (last N days).
-    Fast version: single Scattergl trace (no layout.shapes), tight layout (no big whitespace).
+    Fast version: single Scattergl trace (no layout.shapes).
+    Fixes uneven spacing by locking x/y scale (scaleanchor),
+    while keeping layout tight (labels in paper coords).
     """
     import numpy as np
     import pandas as pd
@@ -520,7 +522,7 @@ def render_activity_grid(
     grid = grid.merge(daily, on="day", how="left").fillna({"plays": 0})
     grid["plays"] = grid["plays"].astype(int)
 
-    # coords
+    # --- coords
     first_monday = start - timedelta(days=start.weekday())
     grid["day_ts"] = pd.to_datetime(grid["day"])  # naive timestamp
     grid["day_name"] = grid["day_ts"].dt.day_name()
@@ -530,7 +532,7 @@ def render_activity_grid(
     grid["week"] = ((grid["day_ts"] - first_monday_ts).dt.days // 7).astype(int)
     n_weeks = int(grid["week"].max()) + 1
 
-    # levels (0..4)
+    # --- levels (0..4)
     grid["level"] = 0
     pos = grid["plays"] > 0
     if pos.any():
@@ -583,7 +585,6 @@ def render_activity_grid(
                 symbol="square",
                 size=cell_px,
                 color=colors,
-                # лёгкий "софт" по краю
                 line=dict(width=1, color=SPOTIFY_BG),
             ),
             customdata=customdata,
@@ -592,10 +593,15 @@ def render_activity_grid(
         )
     )
 
-    # Month labels
+    # --- RANGES: only the grid itself (so no vertical "mystery whitespace")
+    x_min = -0.5 * step
+    x_max = (n_weeks - 1) * step + 0.5 * step
+    y_min = -0.5 * step
+    y_max = 6 * step + 0.5 * step
+
+    # --- Month labels (top) in PAPER coords (do not affect y-range)
     month_starts = pd.date_range(start, end, freq="MS").date
     used = set()
-    month_y = 7.05 * step  # чуть выше первой строки
     for m in month_starts:
         w = (m - first_monday).days // 7
         if w in used:
@@ -603,7 +609,9 @@ def render_activity_grid(
         used.add(w)
         fig.add_annotation(
             x=w * step - (cell_px / 2.0),
-            y=month_y,
+            xref="x",
+            y=1.06,              # slightly above plot area
+            yref="paper",
             text=pd.Timestamp(m).strftime("%b"),
             showarrow=False,
             font=dict(color=SPOTIFY_MUTED, size=16),
@@ -611,11 +619,13 @@ def render_activity_grid(
             yanchor="middle",
         )
 
-    # Left labels
+    # --- Left labels in PAPER X (do not affect x-range)
     for dow, txt in {0: "Mon", 2: "Wed", 4: "Fri"}.items():
         fig.add_annotation(
-            x=-2.0 * step,
+            x=-0.02,            # a bit left of plot area
+            xref="paper",
             y=(6 - dow) * step,
+            yref="y",
             text=txt,
             showarrow=False,
             font=dict(color=SPOTIFY_MUTED, size=16),
@@ -623,29 +633,29 @@ def render_activity_grid(
             yanchor="middle",
         )
 
-    # Tight ranges (no scaleanchor => no huge whitespace)
-    y_min = -0.35 * step
-    y_max = month_y + 0.55 * step
-
-    # height под содержимое (убираем пустоты)
-    # 7 рядов + зона под month labels
-    height = int((7.0 * step) + (1.6 * step))  # обычно 180-240px
+    # --- Height tight to grid (anchor will keep x/y scale equal => gaps одинаковые)
+    # 7 rows * step + a bit for month labels area
+    height = int(7 * step + 36)
 
     fig.update_layout(
         paper_bgcolor=SPOTIFY_BG,
         plot_bgcolor=SPOTIFY_BG,
-        margin=dict(l=60, r=20, t=0, b=0),
+        margin=dict(l=40, r=16, t=26, b=8),
+        height=height,
         xaxis=dict(
             visible=False,
-            range=[-3 * step, (n_weeks + 2) * step],
+            range=[x_min, x_max],
             fixedrange=True,
+            constrain="domain",
         ),
         yaxis=dict(
             visible=False,
             range=[y_min, y_max],
             fixedrange=True,
+            scaleanchor="x",
+            scaleratio=1,
+            constrain="domain",
         ),
-        height=height,
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
