@@ -1352,7 +1352,10 @@ with tab_weekly:
 
     # Week bucket in LOCAL time (week starts Monday)
     played_local_naive = dfw["played_at_utc"].dt.tz_convert(tz).dt.tz_localize(None)
-    dfw["week_dt"] = played_local_naive.dt.to_period("W-MON").dt.start_time.dt.normalize()  # Monday (datetime)
+    local_day = played_local_naive.dt.normalize()
+
+    # Monday of that week (Mon=0)
+    dfw["week_dt"] = (local_day - pd.to_timedelta(local_day.dt.weekday, unit="D")).dt.normalize()
 
     # Active days per week (LOCAL days)
     active_days = (
