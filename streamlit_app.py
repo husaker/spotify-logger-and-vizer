@@ -532,7 +532,9 @@ def render_activity_grid(
 
     # week index & dow
     grid["dow"] = grid["day_ts"].dt.weekday.astype(int)  # Mon=0..Sun=6
-    grid["week"] = ((grid["day"] - first_monday).astype("timedelta64[D]").astype(int) // 7).astype(int)
+
+    first_monday_ts = pd.Timestamp(first_monday)  # naive timestamp
+    grid["week"] = ((grid["day_ts"] - first_monday_ts).dt.days // 7).astype(int)
 
     n_weeks = int(grid["week"].max()) + 1
 
