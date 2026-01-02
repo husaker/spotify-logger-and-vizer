@@ -1085,11 +1085,11 @@ with st.sidebar:
     min_data_date = st.session_state.get("min_data_date")  # may be None until we load df_log once
 
     if preset == "All time":
-        default_from = datetime(current_year, 1, 1, tzinfo=timezone.utc).date()
+        default_from = min_data_date or datetime(current_year, 1, 1, tzinfo=timezone.utc).date()
         default_to = today_utc
 
     elif preset == "This year":
-        default_from = min_data_date or datetime(current_year, 1, 1, tzinfo=timezone.utc).date()
+        default_from = datetime(current_year, 1, 1, tzinfo=timezone.utc).date()
         default_to = today_utc
 
     elif preset == "Last 7 days":

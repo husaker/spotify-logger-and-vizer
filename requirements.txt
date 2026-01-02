@@ -5,4 +5,4 @@ gspread==6.1.4
 google-auth==2.34.0
 urllib3
 streamlit
-plotly
+plotly>=6.0.0
