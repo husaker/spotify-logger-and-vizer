@@ -640,7 +640,7 @@ def render_activity_grid(
     fig.update_layout(
         paper_bgcolor=SPOTIFY_BG,
         plot_bgcolor=SPOTIFY_BG,
-        margin=dict(l=40, r=16, t=26, b=8),
+        margin=dict(l=54, r=16, t=26, b=8),
         height=height,
         xaxis=dict(
             visible=False,
