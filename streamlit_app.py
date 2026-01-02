@@ -476,10 +476,12 @@ def render_activity_grid(
     Plotly version (hover per day).
     Metric: Plays only.
     Coloring: 0 + 4 levels via percentiles on active days.
-    """
 
-    import plotly.graph_objects as go
+    Optimized: uses single Scattergl trace (no per-day shapes).
+    """
+    import numpy as np
     import pandas as pd
+    import plotly.graph_objects as go
     from datetime import timedelta
 
     st.markdown(f"### Activity (last {days} days)")
@@ -512,24 +514,25 @@ def render_activity_grid(
         st.info(f"No activity data in the last {days} days.")
         return
 
-    # daily plays (we keep uniq_tracks for future if needed, but it's NOT in tooltip now)
+    # daily plays
     daily = (
         base.groupby("day", dropna=False)
-        .agg(plays=("track_id", "size"), uniq_tracks=("track_id", pd.Series.nunique))
+        .agg(plays=("track_id", "size"))
         .reset_index()
     )
 
     grid = pd.DataFrame({"day": pd.date_range(start, end, freq="D").date})
-    grid = grid.merge(daily, on="day", how="left").fillna({"plays": 0, "uniq_tracks": 0})
+    grid = grid.merge(daily, on="day", how="left").fillna({"plays": 0})
     grid["plays"] = grid["plays"].astype(int)
-    grid["uniq_tracks"] = grid["uniq_tracks"].astype(int)
 
     # map day -> week index (Mon-based) and dow
     first_monday = start - timedelta(days=start.weekday())
-    grid["week"] = grid["day"].apply(lambda d: (d - first_monday).days // 7).astype(int)
-    grid["dow"] = pd.to_datetime(grid["day"]).dt.weekday.astype(int)  # Mon=0..Sun=6
-    grid["day_ts"] = pd.to_datetime(grid["day"])
+    grid["day_ts"] = pd.to_datetime(grid["day"])  # naive
     grid["day_name"] = grid["day_ts"].dt.day_name()
+
+    # week index & dow
+    grid["dow"] = grid["day_ts"].dt.weekday.astype(int)  # Mon=0..Sun=6
+    grid["week"] = ((grid["day"] - first_monday).astype("timedelta64[D]").astype(int) // 7).astype(int)
 
     n_weeks = int(grid["week"].max()) + 1
 
@@ -565,43 +568,37 @@ def render_activity_grid(
 
     # --- grid geometry in "px-like" units
     step = cell_px + gap_px
-    half = cell_px / 2.0
 
     # convert grid coords to plot coords (invert y so Mon is top)
     grid["x"] = grid["week"] * step
     grid["y"] = (6 - grid["dow"]) * step
 
-    # hover text (ONLY date + plays)
-    hover = [
-        f"<b>{d:%Y-%m-%d}</b> ({dn})<br>"
-        f"Plays: <b>{p}</b>"
-        for d, dn, p in zip(grid["day_ts"], grid["day_name"], grid["plays"])
-    ]
+    # --- SINGLE Scattergl trace (squares) + hover via customdata
+    colors = grid["level"].map(lambda v: palette[int(v)]).tolist()
 
-    fig = go.Figure()
+    customdata = np.stack(
+        [
+            grid["day_ts"].dt.strftime("%Y-%m-%d").to_numpy(),
+            grid["day_name"].to_numpy(),
+            grid["plays"].to_numpy(),
+        ],
+        axis=1,
+    )
 
-    # shapes for real squares + real gaps + borders
-    for x, y, lvl in zip(grid["x"], grid["y"], grid["level"]):
-        fig.add_shape(
-            type="rect",
-            x0=x - half,
-            x1=x + half,
-            y0=y - half,
-            y1=y + half,
-            line=dict(width=1, color=SPOTIFY_BG),  # divider
-            fillcolor=palette[int(lvl)],
-            layer="below",
-        )
-
-    # invisible scatter layer for hover
-    fig.add_trace(
-        go.Scatter(
+    fig = go.Figure(
+        go.Scattergl(
             x=grid["x"],
             y=grid["y"],
             mode="markers",
-            marker=dict(size=cell_px, opacity=0.0),
-            hovertemplate="%{text}<extra></extra>",
-            text=hover,
+            marker=dict(
+                symbol="square",
+                size=cell_px,
+                color=colors,
+                line=dict(width=1, color=SPOTIFY_BG),  # divider like before
+            ),
+            customdata=customdata,
+            hovertemplate="<b>%{customdata[0]}</b> (%{customdata[1]})<br>"
+                          "Plays: <b>%{customdata[2]}</b><extra></extra>",
         )
     )
 
@@ -615,7 +612,7 @@ def render_activity_grid(
             continue
         used.add(w)
         fig.add_annotation(
-            x=w * step - half,
+            x=w * step - (cell_px / 2.0),
             y=month_y,
             text=pd.Timestamp(m).strftime("%b"),
             showarrow=False,
@@ -637,14 +634,14 @@ def render_activity_grid(
             yanchor="middle",
         )
 
-    # --- Tight ranges to avoid "mystery whitespace"
-    y_min = -0.45 * step                 # небольшой верхний "воздух" над нижней строкой
-    y_max = month_y + 0.65 * step        # ровно чтобы поместились month labels
+    # --- Tight ranges to avoid whitespace
+    y_min = -0.45 * step
+    y_max = month_y + 0.65 * step
 
     fig.update_layout(
         paper_bgcolor=SPOTIFY_BG,
         plot_bgcolor=SPOTIFY_BG,
-        margin=dict(l=60, r=20, t=6, b=6),  # реально маленькие маргины
+        margin=dict(l=60, r=20, t=6, b=6),
         xaxis=dict(
             visible=False,
             range=[-3 * step, (n_weeks + 2) * step],
@@ -657,7 +654,7 @@ def render_activity_grid(
             scaleratio=1,
             fixedrange=True,
         ),
-        height=280,  # чуть ниже, чтобы не было ощущения "пустоты"
+        height=280,
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
@@ -1071,7 +1068,7 @@ st.markdown("## Dashboard")
 with st.sidebar:
     st.markdown("### Time range")
 
-    presets = ["This year", "All time", "Last 7 days", "Last 30 days", "Last 90 days", "Custom"]
+    presets = ["All time", "This year", "Last 7 days", "Last 30 days", "Last 90 days", "Custom"]
     preset = st.selectbox("Quick range", presets, index=0)
 
     today_utc = datetime.now(timezone.utc).date()
