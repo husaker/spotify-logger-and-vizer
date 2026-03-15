@@ -187,7 +187,7 @@ Notes:
 
 ## 7. Set Up the GitHub Actions Worker
 
-The scheduled worker already exists at [.github/workflows/sync.yml](/Users/d.dovbiy/Desktop/my_prjcts/spotify-logger-and-vizer/spotify-logger-and-vizer/.github/workflows/sync.yml).
+The scheduled worker already exists at `.github/workflows/sync.yml`.
 
 Add these GitHub repository secrets:
 
