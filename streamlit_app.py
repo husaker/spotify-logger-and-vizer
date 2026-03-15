@@ -227,6 +227,10 @@ if "sheet_input" not in st.session_state:
     st.session_state["sheet_input"] = ""
 if "min_data_date" not in st.session_state:
     st.session_state["min_data_date"] = None  # earliest date in df_log, used for "All time"
+if "dashboard_ws_backup" not in st.session_state:
+    st.session_state["dashboard_ws_backup"] = {}
+if "dashboard_fallback" not in st.session_state:
+    st.session_state["dashboard_fallback"] = {"log": False, "meta": False}
 
 # -----------------------------
 # Helpers
@@ -418,11 +422,35 @@ def registry_get_sheet_status(registry_ws, user_sheet_id: str) -> tuple[bool, bo
 # -----------------------------
 # Cached reads (reduce 429 on reruns)
 # -----------------------------
+def is_google_quota_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "429" in msg or "quota exceeded" in msg or "rate limit" in msg or "user-rate limit" in msg
+
+
+def _dashboard_backup_key(sheet_id: str, scope: str) -> str:
+    return f"{sheet_id}:{scope}"
+
+
+def remember_dashboard_backup(sheet_id: str, scope: str, payload: Any) -> None:
+    st.session_state["dashboard_ws_backup"][_dashboard_backup_key(sheet_id, scope)] = payload
+
+
+def get_dashboard_backup(sheet_id: str, scope: str) -> Any | None:
+    return (st.session_state.get("dashboard_ws_backup") or {}).get(_dashboard_backup_key(sheet_id, scope))
+
+
+def _sheet_title_from_a1_range(a1_range: str) -> str:
+    title = str(a1_range or "").split("!", 1)[0]
+    if title.startswith("'") and title.endswith("'"):
+        title = title[1:-1].replace("''", "'")
+    return title
+
+
 @st.cache_data(ttl=90, show_spinner=False)
-def cached_ws_values(service_json: str, sheet_id: str, ws_title: str, refresh_key: int) -> list[list[str]]:
+def cached_log_ws_values(service_json: str, sheet_id: str, refresh_key: int) -> list[list[str]]:
     sheets_local = SheetsClient.from_service_account_json(service_json)
     ss_local = sheets_local.open_by_key(sheet_id)
-    ws = ss_local.worksheet(ws_title)
+    ws = ss_local.worksheet("log")
     return gcall(lambda: ws.get_all_values())
 
 
@@ -434,8 +462,62 @@ def df_from_ws_rows(rows: list[list[str]]) -> pd.DataFrame:
     return pd.DataFrame(data, columns=header[: len(header)])
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_metadata_ws_values(service_json: str, sheet_id: str, refresh_key: int) -> dict[str, list[list[str]]]:
+    sheets_local = SheetsClient.from_service_account_json(service_json)
+    ss_local = sheets_local.open_by_key(sheet_id)
+    ws_titles = ["__cache_tracks", "__cache_artists", "__cache_albums"]
+    ranges = [f"'{title}'!A:Z" for title in ws_titles]
+    resp = gcall(lambda: ss_local.values_batch_get(ranges))
+
+    rows_by_title: dict[str, list[list[str]]] = {title: [] for title in ws_titles}
+    for value_range in resp.get("valueRanges", []):
+        title = _sheet_title_from_a1_range(value_range.get("range", ""))
+        if title in rows_by_title:
+            rows_by_title[title] = value_range.get("values", []) or []
+    return rows_by_title
+
+
+def load_log_rows_resilient(settings, sheet_id: str) -> list[list[str]]:
+    try:
+        rows = cached_log_ws_values(
+            settings.google_service_account_json,
+            sheet_id,
+            st.session_state["refresh_key"],
+        )
+        remember_dashboard_backup(sheet_id, "log", rows)
+        st.session_state["dashboard_fallback"]["log"] = False
+        return rows
+    except gspread.exceptions.APIError as e:
+        if is_google_quota_error(e):
+            backup = get_dashboard_backup(sheet_id, "log")
+            if backup is not None:
+                st.session_state["dashboard_fallback"]["log"] = True
+                return backup
+        raise
+
+
+def load_metadata_rows_resilient(settings, sheet_id: str) -> dict[str, list[list[str]]]:
+    try:
+        rows_by_title = cached_metadata_ws_values(
+            settings.google_service_account_json,
+            sheet_id,
+            st.session_state["refresh_key"],
+        )
+        remember_dashboard_backup(sheet_id, "meta", rows_by_title)
+        st.session_state["dashboard_fallback"]["meta"] = False
+        return rows_by_title
+    except gspread.exceptions.APIError as e:
+        if is_google_quota_error(e):
+            backup = get_dashboard_backup(sheet_id, "meta")
+            if backup is not None:
+                st.session_state["dashboard_fallback"]["meta"] = True
+                return backup
+        raise
+
+
 def load_log_df_cached(settings, sheet_id: str) -> pd.DataFrame:
-    rows = cached_ws_values(settings.google_service_account_json, sheet_id, "log", st.session_state["refresh_key"])
+    rows = load_log_rows_resilient(settings, sheet_id)
     if not rows or len(rows) < 2:
         return pd.DataFrame(columns=["Date", "Track", "Artist", "Spotify ID", "URL"])
 
@@ -456,9 +538,8 @@ def load_log_df_cached(settings, sheet_id: str) -> pd.DataFrame:
 
 
 def load_cache_tracks_df(settings, sheet_id: str) -> pd.DataFrame:
-    rows = cached_ws_values(
-        settings.google_service_account_json, sheet_id, "__cache_tracks", st.session_state["refresh_key"]
-    )
+    rows_by_title = load_metadata_rows_resilient(settings, sheet_id)
+    rows = rows_by_title.get("__cache_tracks", [])
     df = df_from_ws_rows(rows)
     if df.empty:
         return pd.DataFrame(
@@ -478,9 +559,8 @@ def load_cache_tracks_df(settings, sheet_id: str) -> pd.DataFrame:
 
 
 def load_cache_artists_df(settings, sheet_id: str) -> pd.DataFrame:
-    rows = cached_ws_values(
-        settings.google_service_account_json, sheet_id, "__cache_artists", st.session_state["refresh_key"]
-    )
+    rows_by_title = load_metadata_rows_resilient(settings, sheet_id)
+    rows = rows_by_title.get("__cache_artists", [])
     df = df_from_ws_rows(rows)
     if df.empty:
         return pd.DataFrame(
@@ -490,9 +570,8 @@ def load_cache_artists_df(settings, sheet_id: str) -> pd.DataFrame:
 
 
 def load_cache_albums_df(settings, sheet_id: str) -> pd.DataFrame:
-    rows = cached_ws_values(
-        settings.google_service_account_json, sheet_id, "__cache_albums", st.session_state["refresh_key"]
-    )
+    rows_by_title = load_metadata_rows_resilient(settings, sheet_id)
+    rows = rows_by_title.get("__cache_albums", [])
     df = df_from_ws_rows(rows)
     if df.empty:
         return pd.DataFrame(columns=["album_id", "album_name", "album_cover_url", "release_date", "fetched_at"])
@@ -942,10 +1021,6 @@ if code and state_cb:
     st.session_state["active_sheet_id"] = sid_from_state
     st.session_state["render_dashboard"] = False
     st.session_state["refresh_key"] += 1
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
 
     st.success("Spotify connected! Returning to your sheet…")
     st.rerun()
@@ -984,10 +1059,6 @@ if load_clicked:
         st.session_state["refresh_key"] += 1
         st.session_state["registry_cache"] = {"ts": None, "registered": False, "enabled": False, "existing_sheet": None}
         st.session_state["min_data_date"] = None
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
 
     set_query_params(sheet=candidate_sheet_id)
     st.rerun()
@@ -1298,6 +1369,8 @@ if not st.session_state.get("render_dashboard"):
 # -----------------------------
 # Load data (log + caches)
 # -----------------------------
+st.session_state["dashboard_fallback"] = {"log": False, "meta": False}
+
 try:
     df_log = load_log_df_cached(settings, sheet_id)
 
@@ -1325,10 +1398,14 @@ try:
     df_calb = load_cache_albums_df(settings, sheet_id)
 except gspread.exceptions.APIError as e:
     msg = str(e)
-    if "Quota exceeded" in msg or "[429]" in msg or "429" in msg:
+    if is_google_quota_error(e) or "Quota exceeded" in msg or "[429]" in msg or "429" in msg:
         st.warning("Google Sheets quota exceeded (429). Wait ~60 seconds and click **Refresh data**.")
         st.stop()
     raise
+
+fallback_state = st.session_state.get("dashboard_fallback") or {}
+if fallback_state.get("log") or fallback_state.get("meta"):
+    st.warning("Google Sheets quota was exceeded, so the dashboard is showing the last cached snapshot for this sheet.")
 
 if df_log.empty:
     st.info("No rows in log yet. Wait until the worker appends some plays.")
