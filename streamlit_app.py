@@ -1418,8 +1418,8 @@ st.divider()
 # -----------------------------
 # Tabs
 # -----------------------------
-tab_artists, tab_tracks, tab_albums, tab_genres, tab_weekly, tab_discovery_replay, tab_fingerprint = st.tabs(
-    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Top 5 Genres", "Weekly avg", "Discovery vs Replay", "Listening fingerprint"]
+tab_artists, tab_tracks, tab_albums, tab_genres, tab_plays, tab_discovery_replay, tab_fingerprint = st.tabs(
+    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Top 5 Genres", "Plays", "Discovery vs Replay", "Listening fingerprint"]
 )
 
 # ===== Top 5 Artists =====
@@ -1520,122 +1520,103 @@ with tab_albums:
         )
     render_top_cards(items, cols=5)
 
-# ===== Weekly avg (avg per active day) + cover markers on the line =====
-# ===== Weekly avg (avg per active day) + cover markers on the line =====
-with tab_weekly:
-    st.markdown("### Average plays per active day by week")
+# ===== Plays =====
+with tab_plays:
+    st.markdown("### Plays")
 
-    dfw = df.copy()
+    plays_grain = st.selectbox("Granularity", ["Week", "Month"], index=0, key="plays_grain")
 
-    # Week bucket in LOCAL time (week starts Monday)
-    played_local_naive = dfw["played_at_utc"].dt.tz_convert(tz).dt.tz_localize(None)
-    local_day = played_local_naive.dt.normalize()
+    dfp = df.copy()
+    played_local_naive = dfp["played_at_utc"].dt.tz_convert(tz).dt.tz_localize(None)
 
-    # Monday of that week (Mon=0)
-    dfw["week_dt"] = (local_day - pd.to_timedelta(local_day.dt.weekday, unit="D")).dt.normalize()
+    if plays_grain == "Month":
+        dfp["bucket_dt"] = played_local_naive.dt.to_period("M").dt.to_timestamp()
+    else:
+        played_day = played_local_naive.dt.normalize()
+        dfp["bucket_dt"] = (played_day - pd.to_timedelta(played_day.dt.weekday, unit="D")).dt.normalize()
 
-    # Active days per week (LOCAL days)
-    active_days = (
-        dfw.assign(day_local=played_local_naive.dt.date)
-           .groupby("week_dt")["day_local"]
-           .nunique()
-           .reset_index(name="active_days")
-    )
-
-    week_agg = (
-        dfw.groupby("week_dt")
+    plays_agg = (
+        dfp.groupby("bucket_dt", dropna=False)
            .agg(plays=("track_id", "count"), minutes=("minutes", "sum"))
            .reset_index()
-           .sort_values("week_dt")
+           .sort_values("bucket_dt")
     )
 
-    week_agg = week_agg.merge(active_days, on="week_dt", how="left")
-    week_agg["active_days"] = week_agg["active_days"].fillna(0).astype(int)
-
-    week_agg["avg_tracks_per_active_day"] = week_agg.apply(
-        lambda r: (r["plays"] / r["active_days"]) if r["active_days"] > 0 else 0.0,
-        axis=1,
-    )
-    week_agg["avg_minutes_per_active_day"] = week_agg.apply(
-        lambda r: (r["minutes"] / r["active_days"]) if r["active_days"] > 0 else 0.0,
-        axis=1,
-    )
-
-    # Top track per week (by plays)
     top_track = (
-        dfw.groupby(["week_dt", "track_id", "Track", "Artist"], dropna=False)
+        dfp.groupby(["bucket_dt", "track_id", "Track", "Artist"], dropna=False)
            .size()
            .reset_index(name="plays_track")
-           .sort_values(["week_dt", "plays_track", "Track", "Artist"], ascending=[True, False, True, True])
+           .sort_values(["bucket_dt", "plays_track", "Track", "Artist"], ascending=[True, False, True, True])
     )
-    top_track = top_track.groupby("week_dt").head(1)
+    top_track = top_track.groupby("bucket_dt").head(1)
 
     cover_by_track = (
-        dfw.groupby("track_id")["track_cover_url"]
+        dfp.groupby("track_id")["track_cover_url"]
            .agg(lambda s: next((x for x in s if isinstance(x, str) and x.strip()), ""))
            .to_dict()
     )
     top_track["track_cover_url"] = top_track["track_id"].map(cover_by_track)
 
-    plays_w = week_agg.merge(
-        top_track[["week_dt", "Track", "Artist", "plays_track", "track_cover_url"]],
-        on="week_dt",
+    plays_view = plays_agg.merge(
+        top_track[["bucket_dt", "Track", "Artist", "plays_track", "track_cover_url"]],
+        on="bucket_dt",
         how="left",
     )
 
-    # ---- AXIS LABELS (string) + proper sorting by week_dt
-    plays_w["week_label"] = plays_w["week_dt"].dt.strftime("%d.%m.%Y")  # Monday label
-
     tooltip_main = [
-        alt.Tooltip("week_label:N", title="Week (Mon)"),
-        alt.Tooltip("avg_tracks_per_active_day:Q", title="Avg tracks / active day", format=".2f"),
-        alt.Tooltip("avg_minutes_per_active_day:Q", title="Avg minutes / active day", format=".1f"),
-        alt.Tooltip("plays:Q", title="Tracks played (total)", format=",d"),
-        alt.Tooltip("active_days:Q", title="Active days", format=",d"),
+        period_tooltip(),
+        alt.Tooltip("plays:Q", title="Plays", format=",d"),
+        alt.Tooltip("minutes:Q", title="Minutes", format=".1f"),
         alt.Tooltip("Track:N", title="Top track"),
         alt.Tooltip("Artist:N", title="Artist"),
         alt.Tooltip("plays_track:Q", title="Top track plays", format=",d"),
     ]
 
-    base = alt.Chart(plays_w).encode(
-        x=alt.X(
-            "week_label:N",
-            title=None,
-            sort=alt.SortField("week_dt", order="ascending"),
-            axis=alt.Axis(labelAngle=-45, labelOverlap="greedy"),
+    bars = (
+        alt.Chart(plays_view)
+        .mark_bar(color=SPOTIFY_GREEN, cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .encode(
+            x=x_bucket(plays_grain),
+            y=alt.Y("plays:Q", title="Plays"),
+            tooltip=tooltip_main,
         )
     )
 
-    line = base.mark_line(color=SPOTIFY_GREEN).encode(
-        y=alt.Y("avg_tracks_per_active_day:Q", title="Avg tracks / active day"),
-        tooltip=tooltip_main,
-    )
-
-    points = base.mark_point(color=SPOTIFY_GREEN, size=55).encode(
-        y="avg_tracks_per_active_day:Q",
-        tooltip=tooltip_main,
-    )
-
-    img_df = plays_w[plays_w["track_cover_url"].fillna("").astype(str).str.len() > 0].copy()
+    img_df = plays_view[plays_view["track_cover_url"].fillna("").astype(str).str.len() > 0].copy()
 
     tooltip_cover = [
-        alt.Tooltip("week_label:N", title="Week (Mon)"),
+        period_tooltip(),
         alt.Tooltip("Track:N", title="Top track"),
         alt.Tooltip("Artist:N", title="Artist"),
         alt.Tooltip("plays_track:Q", title="Top track plays", format=",d"),
-        alt.Tooltip("avg_tracks_per_active_day:Q", title="Avg tracks / active day", format=".2f"),
-        alt.Tooltip("plays:Q", title="Tracks played (total)", format=",d"),
-        alt.Tooltip("active_days:Q", title="Active days", format=",d"),
+        alt.Tooltip("plays:Q", title="Plays", format=",d"),
     ]
 
-    covers = alt.Chart(img_df).mark_image(width=34, height=34, dy=-26).encode(
-        x=alt.X("week_label:N", sort=alt.SortField("week_dt", order="ascending")),
-        y="avg_tracks_per_active_day:Q",
-        url="track_cover_url:N",
-        tooltip=tooltip_cover,
+    covers = (
+        alt.Chart(img_df)
+        .mark_image(width=32, height=32, dy=-22)
+        .encode(
+            x=x_bucket(plays_grain),
+            y="plays:Q",
+            url="track_cover_url:N",
+            tooltip=tooltip_cover,
+        )
     )
 
-    st.altair_chart((line + points + covers).properties(height=500), width="stretch")
+    plays_chart = (
+        alt.layer(bars, covers)
+        .properties(height=500, background=SPOTIFY_BG)
+        .configure_view(strokeOpacity=0)
+        .configure_axis(
+            labelColor=SPOTIFY_MUTED,
+            titleColor=SPOTIFY_MUTED,
+            grid=False,
+            tickColor=SPOTIFY_BORDER,
+            domainColor=SPOTIFY_BORDER,
+        )
+    )
+
+    st.altair_chart(plays_chart, width="stretch")
 
 
 # ===== Top 5 Genres =====
@@ -1797,7 +1778,7 @@ with tab_fingerprint:
 with tab_discovery_replay:
     st.markdown("### Discovery vs Replay")
     st.markdown(
-        '<div class="small-muted">New = first time a track appears in your whole log. Repeat = all other plays. The line shows exploration score = share of new unique tracks.</div>',
+        '<div class="small-muted">New = first time a track appears in your whole log. Repeat = all other plays. Exploration score is shown above each bar as the share of new unique tracks.</div>',
         unsafe_allow_html=True,
     )
 
@@ -1821,7 +1802,6 @@ with tab_discovery_replay:
         df_dr["first_bucket"] = (first_day - pd.to_timedelta(first_day.dt.weekday, unit="D")).dt.normalize()
 
     df_dr["is_new"] = df_dr["bucket"] == df_dr["first_bucket"]
-    df_dr["type"] = df_dr["is_new"].map({True: "New", False: "Repeat"})
 
     uniq_all = df_dr.groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_all")
     uniq_new = df_dr[df_dr["is_new"]].groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_new")
@@ -1836,6 +1816,7 @@ with tab_discovery_replay:
             lambda r: (r["uniq_new"] / r["uniq_all"]) if r["uniq_all"] > 0 else 0.0,
             axis=1,
         )
+        agg_u["exploration_score_label"] = agg_u["exploration_score"].map(lambda x: f"{x * 100:.0f}%")
 
         bars_df = pd.concat(
             [
@@ -1873,35 +1854,45 @@ with tab_discovery_replay:
             .encode(
                 x=x_bucket(grain),
                 y=alt.Y("value:Q", title="Unique tracks", stack=True),
-                color=alt.Color("type:N", title=None, scale=color_scale),
+                color=alt.Color(
+                    "type:N",
+                    title=None,
+                    scale=color_scale,
+                    legend=alt.Legend(
+                        orient="top-right",
+                        direction="vertical",
+                        fillColor=SPOTIFY_CARD,
+                        strokeColor=SPOTIFY_BORDER,
+                        padding=8,
+                        cornerRadius=10,
+                        labelColor=SPOTIFY_TEXT,
+                        symbolType="square",
+                        symbolSize=90,
+                    ),
+                ),
                 tooltip=tooltip_bars,
             )
         )
 
-        line = (
+        score_labels = (
             alt.Chart(agg_u)
-            .mark_line(color=DISCOVERY_ACCENT, strokeWidth=2.75)
+            .mark_text(color=DISCOVERY_ACCENT, fontSize=12, fontWeight=700, dy=-10)
             .encode(
                 x=x_bucket(grain),
-                y=alt.Y(
-                    "exploration_score:Q",
-                    title=None,
-                    scale=alt.Scale(domain=[0, 1]),
-                    axis=alt.Axis(format="%", orient="right"),
-                ),
+                y=alt.Y("uniq_all:Q"),
+                text="exploration_score_label:N",
                 tooltip=tooltip_line,
             )
         )
 
         ch = (
-            alt.layer(bars, line)
-            .resolve_scale(y="independent")
+            alt.layer(bars, score_labels)
             .properties(height=520, background=SPOTIFY_BG)
             .configure_view(strokeOpacity=0)
             .configure_axis(
                 labelColor=SPOTIFY_MUTED,
                 titleColor=SPOTIFY_MUTED,
-                gridColor=SPOTIFY_BORDER,
+                grid=False,
                 tickColor=SPOTIFY_BORDER,
                 domainColor=SPOTIFY_BORDER,
             )
