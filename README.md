@@ -1,47 +1,32 @@
 # Spotify Logger and Dashboard
 
-Spotify Logger and Dashboard is a DB-less Spotify analytics app built with Streamlit, Google Sheets, and the Spotify Web API.
+Spotify Logger stores Spotify listening history in Google Sheets and shows a Streamlit dashboard on top of it.
 
-It lets you connect a Spotify account, store listening history in your own Google Sheet, and explore it through a dashboard with KPIs, top artists/tracks/albums, genres, listening fingerprint charts, and new-vs-repeat analysis.
+This README is only about setup and operations:
 
-## How it works
+- Spotify app setup
+- Google service account setup
+- required Google Sheets
+- local `.env` and cloud secrets
+- Streamlit deployment
+- GitHub Actions worker setup
+- first-time user flow
 
-- Streamlit is the UI for setup and analytics.
-- Google Sheets is the storage layer.
-- Spotify provides recently played tracks and metadata.
-- A background worker syncs new plays into each user sheet.
-- GitHub Actions can run that worker every 5 minutes.
+Important: this project starts collecting data from the moment you connect Spotify. It is not a full historical importer.
 
-Each user keeps their own Google Sheet. The app creates tabs such as `log`, `__app_state`, `__dedupe`, and metadata caches inside that sheet.
-
-This project starts collecting data from the moment you connect it. It is not a full historical Spotify importer.
-
-## Features
-
-- Connect Spotify with OAuth
-- Store listening events in your own Google Sheet
-- Run without a database
-- Enrich tracks, artists, and albums with cached metadata
-- View a Streamlit dashboard with:
-  - total plays
-  - unique tracks and artists
-  - minutes listened
-  - activity grid
-  - top 5 artists, tracks, albums, and genres
-  - weekly listening average
-  - listening fingerprint by weekday and hour
-  - new vs repeat listening analysis
-
-## Requirements
+## What You Need
 
 - Python 3.12 recommended
-- A Spotify Developer application
-- A Google Cloud service account with Google Sheets API enabled
-- Two Google Sheets:
-  - one registry spreadsheet for background sync bookkeeping
-  - one or more user spreadsheets for actual listening logs
+- a Spotify Developer app
+- a Google Cloud project with Google Sheets API enabled
+- one Google service account
+- one registry spreadsheet
+- one user spreadsheet per Spotify account you want to track
+- optional:
+  - Streamlit Community Cloud for the dashboard
+  - GitHub Actions for scheduled background sync
 
-## 1. Create a Spotify Developer app
+## 1. Create a Spotify Developer App
 
 1. Go to the Spotify Developer Dashboard.
 2. Create a new app.
@@ -50,41 +35,35 @@ This project starts collecting data from the moment you connect it. It is not a 
    - `Client Secret`
 4. Add redirect URIs.
 
-For local development, the main app expects the Streamlit app URL itself as the callback URL, for example:
+Examples:
 
 ```text
 http://localhost:8501
-```
-
-If you deploy the dashboard, add your production URL too, for example:
-
-```text
 https://your-app-name.streamlit.app
 ```
 
-Important:
+Rules:
 
-- `PUBLIC_APP_URL` must exactly match one of the redirect URIs configured in Spotify.
-- The main Streamlit app does not use a `/callback` path.
-- `SPOTIFY_REDIRECT_URI` is only needed for the legacy local helper in `tools/spotify_connect_local.py`.
+- `PUBLIC_APP_URL` must exactly match one of the redirect URIs in Spotify.
+- The main Streamlit app uses the app URL itself as the callback.
+- Do not add `/callback` for the main app.
+- `SPOTIFY_REDIRECT_URI` is only for the legacy helper in `tools/spotify_connect_local.py`.
 
-## 2. Create a Google Cloud service account
+## 2. Create a Google Service Account
 
 1. Create a Google Cloud project.
 2. Enable the Google Sheets API.
 3. Create a service account.
-4. Download its JSON credentials file.
-5. Find the service account email in the JSON file under `client_email`.
+4. Download the JSON credentials file.
+5. Copy the service account email from `client_email`.
 
-The app uses this service account to read and write Google Sheets.
+You do not need a browser Google API key for this project.
 
-You do not need a browser-style Google API key for this project. Use a Google service account JSON credential instead.
+## 3. Create the Required Google Sheets
 
-## 3. Create the required Google Sheets
+### Registry Spreadsheet
 
-### Registry spreadsheet
-
-Create one Google Spreadsheet that will act as the global registry for background sync.
+Create one spreadsheet that will be used by the worker to know which user sheets are enabled for background sync.
 
 Inside it, create a worksheet named:
 
@@ -92,7 +71,7 @@ Inside it, create a worksheet named:
 registry
 ```
 
-Set the first row exactly to:
+Set row 1 exactly to:
 
 ```text
 user_sheet_id,enabled,created_at,last_seen_at,last_sync_at,last_error,spotify_user_id
@@ -100,24 +79,36 @@ user_sheet_id,enabled,created_at,last_seen_at,last_sync_at,last_error,spotify_us
 
 Share the registry spreadsheet with the service account email as `Editor`.
 
-### User spreadsheet
+### User Spreadsheet
 
-Create a normal Google Spreadsheet for each user/account you want to track.
+Create one normal Google Spreadsheet per Spotify account you want to track.
 
 Share each user spreadsheet with the same service account email as `Editor`.
 
 You do not need to create tabs manually. The app will initialize them when the sheet is first loaded.
 
-## 4. Configure environment variables
+## 4. Configure Environment Variables
 
-### Local `.env`
+The app and the worker both read the same environment variables.
 
-Create `.env` from `.env.example`.
+Required:
 
-You can use either:
+- `SPOTIFY_CLIENT_ID`
+- `SPOTIFY_CLIENT_SECRET`
+- `PUBLIC_APP_URL`
+- `REGISTRY_SHEET_ID`
+- `FERNET_KEY`
 
-- `GOOGLE_SERVICE_ACCOUNT_FILE` for local development
-- `GOOGLE_SERVICE_ACCOUNT_JSON` for CI / cloud deployments
+Google authentication:
+
+- local development: `GOOGLE_SERVICE_ACCOUNT_FILE`
+- cloud / CI / GitHub Actions: `GOOGLE_SERVICE_ACCOUNT_JSON`
+
+Optional tuning:
+
+- `SYNC_LOOKBACK_MINUTES`
+- `DEDUP_READ_ROWS`
+- `CACHE_TTL_DAYS`
 
 Generate a Fernet key with:
 
@@ -125,7 +116,11 @@ Generate a Fernet key with:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Example local `.env`:
+### Local `.env`
+
+Create `.env` from `.env.example`.
+
+Example:
 
 ```env
 # Spotify
@@ -150,13 +145,27 @@ DEDUP_READ_ROWS=5000
 CACHE_TTL_DAYS=30
 ```
 
-### Streamlit Community Cloud secrets
+Notes:
 
-If you deploy the dashboard to Streamlit Community Cloud, add the same values in the app secrets at the root level.
+- For local development, `GOOGLE_SERVICE_ACCOUNT_FILE` is the easiest option.
+- `PUBLIC_APP_URL` must be the exact URL you will open in the browser.
+- `REGISTRY_SHEET_ID` must point to the registry spreadsheet, not a user spreadsheet.
 
-This app reads environment variables, so your deployment must expose these values to the running process.
+## 5. Run the Dashboard Locally
 
-Example:
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+Open the local Streamlit URL and use the app normally.
+
+## 6. Deploy the Dashboard to Streamlit Community Cloud
+
+Add root-level secrets in Streamlit Community Cloud:
 
 ```toml
 SPOTIFY_CLIENT_ID = "your_spotify_client_id"
@@ -173,63 +182,12 @@ Notes:
 
 - For Streamlit Cloud, prefer `GOOGLE_SERVICE_ACCOUNT_JSON`.
 - Do not use `GOOGLE_SERVICE_ACCOUNT_FILE` there.
-- Keep the JSON valid. A single-line JSON string or a triple-quoted JSON string both work well here.
+- Keep the JSON valid.
+- `PUBLIC_APP_URL` must match the deployed Streamlit app URL exactly.
 
-## 5. Install dependencies
+## 7. Set Up the GitHub Actions Worker
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-## 6. Run the dashboard locally
-
-```bash
-streamlit run streamlit_app.py
-```
-
-Open the local Streamlit URL, then:
-
-1. Paste a Google Sheet URL or sheet ID for a user sheet.
-2. Click `Load sheet`.
-3. Connect Spotify.
-4. Optionally enable background sync.
-5. Choose a date range and click `Render dashboard`.
-
-## 7. Run the sync worker
-
-Run one sync pass manually:
-
-```bash
-python -m worker.sync --once
-```
-
-Sync only one specific sheet:
-
-```bash
-python -m worker.sync --once --sheet YOUR_USER_SHEET_ID
-```
-
-Initialize one user sheet from the CLI:
-
-```bash
-python -m worker.sync --init-sheet YOUR_USER_SHEET_ID --timezone UTC
-```
-
-What the worker does:
-
-- reads enabled sheets from the registry
-- refreshes Spotify access tokens
-- fetches recently played tracks
-- appends new rows to `log`
-- updates dedupe keys
-- enriches cache tabs with track, artist, and album metadata
-
-## 8. Enable background sync with GitHub Actions
-
-The repository already contains a scheduled workflow at `.github/workflows/sync.yml`.
+The scheduled worker already exists at [.github/workflows/sync.yml](/Users/d.dovbiy/Desktop/my_prjcts/spotify-logger-and-vizer/spotify-logger-and-vizer/.github/workflows/sync.yml).
 
 Add these GitHub repository secrets:
 
@@ -239,44 +197,110 @@ Add these GitHub repository secrets:
 - `SPOTIFY_CLIENT_ID`
 - `SPOTIFY_CLIENT_SECRET`
 
-Then the worker can run on schedule. The current workflow is configured for every 5 minutes.
+Then check the following:
 
-If you prefer, you can also run `python -m worker.sync --once` from any other scheduler such as cron, Railway, Render, or a VPS.
+1. GitHub Actions is enabled for the repository.
+2. The workflow file exists on the default branch.
+3. You manually run the workflow once from the Actions tab using `workflow_dispatch`.
+4. The manual run succeeds before you rely on the schedule.
 
-## 9. First-time setup flow for a new user
+Important:
 
-1. Start the Streamlit app.
-2. Create a user Google Sheet.
-3. Share that sheet with the service account email.
-4. Paste the sheet URL into the app and click `Load sheet`.
-5. Click `Connect Spotify`.
-6. Return to the app after Spotify authorizes the account.
-7. Click `Enable background sync` if you want scheduled syncs.
-8. Run the worker once manually, or wait for the next scheduled GitHub Actions run.
-9. Open the dashboard and render a date range.
+- GitHub scheduled workflows run from the default branch.
+- The current schedule is every 5 minutes.
+- The worker only syncs user sheets that were enabled in the UI.
+
+If you do not want GitHub Actions, you can run this instead from cron, a VPS, Render, Railway, or any other scheduler:
+
+```bash
+python -m worker.sync --once
+```
+
+## 8. First-Time Setup Flow for a User Sheet
+
+1. Create a user Google Sheet.
+2. Share it with the service account email as `Editor`.
+3. Open the Streamlit app.
+4. Paste the user sheet URL or ID into the app.
+5. Click `Load sheet`.
+6. Click `Connect Spotify`.
+7. Complete Spotify OAuth and return to the app.
+8. Click `Enable background sync` if you want scheduled syncs.
+9. Run the GitHub Actions workflow once manually, or run `python -m worker.sync --once`.
+10. Open the dashboard and click `Render dashboard`.
+
+## 9. Commands You Will Probably Use
+
+Run the dashboard locally:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Run one sync pass manually:
+
+```bash
+python -m worker.sync --once
+```
+
+Sync only one specific user sheet:
+
+```bash
+python -m worker.sync --once --sheet YOUR_USER_SHEET_ID
+```
+
+Initialize one user sheet from CLI:
+
+```bash
+python -m worker.sync --init-sheet YOUR_USER_SHEET_ID --timezone UTC
+```
+
+## 10. Setup Checklist
+
+Before expecting data to appear, make sure all of these are true:
+
+- Spotify redirect URI matches `PUBLIC_APP_URL`
+- registry spreadsheet exists and has a `registry` worksheet
+- registry header row matches exactly
+- service account is an `Editor` on the registry spreadsheet
+- service account is an `Editor` on the user spreadsheet
+- dashboard secrets are configured
+- GitHub Actions secrets are configured
+- the workflow is on the default branch
+- the workflow was run manually at least once
+- background sync was enabled in the app for that user sheet
 
 ## Troubleshooting
 
 ### Spotify OAuth fails
 
-- Double-check that `PUBLIC_APP_URL` exactly matches a redirect URI in your Spotify app settings.
-- Make sure you are opening the same URL that you configured in Spotify.
+- `PUBLIC_APP_URL` does not exactly match the redirect URI in Spotify.
+- You are opening a different URL than the one configured in Spotify.
 
 ### The app cannot open a Google Sheet
 
-- Make sure the spreadsheet is shared with the service account email as `Editor`.
-- Make sure `REGISTRY_SHEET_ID` points to the registry spreadsheet, not a user spreadsheet.
+- The spreadsheet is not shared with the service account email.
+- `REGISTRY_SHEET_ID` points to the wrong spreadsheet.
 
 ### Background sync does not start
 
-- Make sure the registry spreadsheet has a worksheet named `registry`.
-- Make sure the header row matches exactly:
+- The registry spreadsheet does not contain a worksheet named `registry`.
+- The header row does not match exactly:
 
 ```text
 user_sheet_id,enabled,created_at,last_seen_at,last_sync_at,last_error,spotify_user_id
 ```
 
-- Make sure you clicked `Enable background sync` in the UI.
+- You did not click `Enable background sync` in the UI.
+- GitHub Actions secrets are missing.
+- The workflow is not on the default branch.
+
+### GitHub Actions runs but no rows appear
+
+- The Spotify account was connected, but background sync was never enabled for that sheet.
+- The worker is running against the wrong `REGISTRY_SHEET_ID`.
+- The user sheet was not shared with the service account.
+- Spotify may simply not have any new recently played items since the last sync.
 
 ### Google Sheets quota errors (`429`)
 
