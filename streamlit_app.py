@@ -431,6 +431,51 @@ def registry_get_sheet_status(registry_ws, user_sheet_id: str, *, snapshot: Any 
         return False, False
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_registered_sheet_choices(service_json: str, registry_sheet_id: str, refresh_key: int) -> list[dict[str, Any]]:
+    try:
+        sheets_local = SheetsClient.from_service_account_json(service_json)
+        registry_ss = sheets_local.open_by_key(registry_sheet_id)
+        registry_ws = sheets_local.get_or_create_worksheet(registry_ss, REGISTRY_TAB, rows=2000, cols=20)
+        ensure_registry_headers(registry_ws)
+
+        items: list[dict[str, Any]] = []
+        if load_registry_snapshot is not None:
+            snapshot = load_registry_snapshot(registry_ws)
+            for entry in snapshot.by_sheet_id.values():
+                items.append(
+                    {
+                        "sheet_id": entry.user_sheet_id,
+                        "enabled": entry.enabled,
+                    }
+                )
+        else:
+            rows = gcall(lambda: registry_ws.get_all_values())
+            for r in rows[1:]:
+                sheet_id = (r[0] or "").strip() if len(r) >= 1 else ""
+                enabled_raw = (r[1] or "").strip().lower() if len(r) >= 2 else ""
+                enabled = enabled_raw in ("true", "1", "yes", "y")
+                if sheet_id:
+                    items.append({"sheet_id": sheet_id, "enabled": enabled})
+
+        items.sort(key=lambda x: (not bool(x["enabled"]), str(x["sheet_id"])))
+        return items
+    except Exception:
+        return []
+
+
+def format_registered_sheet_label(item: dict[str, Any]) -> str:
+    status = "sync ON" if bool(item.get("enabled")) else "sync OFF"
+    return f'{item.get("sheet_id", "")} | {status}'
+
+
+def apply_registered_sheet_choice(label_to_sheet_id: dict[str, str]) -> None:
+    selected_label = str(st.session_state.get("registered_sheet_choice") or "")
+    selected_sheet_id = label_to_sheet_id.get(selected_label, "").strip()
+    if selected_sheet_id:
+        st.session_state["sheet_input"] = selected_sheet_id
+
+
 # -----------------------------
 # Cached reads (reduce 429 on reruns)
 # -----------------------------
@@ -1043,6 +1088,43 @@ if code and state_cb:
 sheet_from_qp = get_query_param("sheet")
 if sheet_from_qp and not st.session_state.get("sheet_input"):
     st.session_state["sheet_input"] = sheet_from_qp
+
+registered_sheet_items = cached_registered_sheet_choices(
+    settings.google_service_account_json,
+    settings.registry_sheet_id,
+    st.session_state["refresh_key"],
+)
+
+if registered_sheet_items:
+    registered_sheet_labels = ["Manual entry"] + [format_registered_sheet_label(item) for item in registered_sheet_items]
+    registered_sheet_map = {
+        format_registered_sheet_label(item): str(item.get("sheet_id") or "").strip()
+        for item in registered_sheet_items
+    }
+
+    current_sheet_id_for_picker = extract_sheet_id(st.session_state.get("sheet_input") or "") or ""
+    default_registered_label = next(
+        (
+            label
+            for label, sheet_id in registered_sheet_map.items()
+            if sheet_id == current_sheet_id_for_picker
+        ),
+        "Manual entry",
+    )
+
+    if (
+        "registered_sheet_choice" not in st.session_state
+        or st.session_state.get("registered_sheet_choice") not in registered_sheet_labels
+    ):
+        st.session_state["registered_sheet_choice"] = default_registered_label
+
+    st.selectbox(
+        "Choose registered sheet",
+        registered_sheet_labels,
+        key="registered_sheet_choice",
+        on_change=apply_registered_sheet_choice,
+        args=(registered_sheet_map,),
+    )
 
 sheet_input = st.text_input(
     "Paste your Google Sheet URL or Sheet ID",
