@@ -28,6 +28,8 @@ from worker.registry import (
     REGISTRY_TAB,
     ensure_registry_headers,
     find_sheet_by_spotify_user_id,
+    load_registry_snapshot,
+    registry_status_from_snapshot,
     upsert_registry_user,
 )
 from worker.user_sheet import ensure_user_sheet_initialized
@@ -403,20 +405,6 @@ def get_registry_ws_best_effort(*, sheets: SheetsClient, settings) -> Any | None
         return registry_ws
     except Exception:
         return None
-
-
-def registry_get_sheet_status(registry_ws, user_sheet_id: str) -> tuple[bool, bool]:
-    try:
-        rows = gcall(lambda: registry_ws.get_all_values())
-        for r in rows[1:]:
-            sid = (r[0] or "").strip() if len(r) >= 1 else ""
-            if sid == user_sheet_id:
-                enabled_raw = (r[1] or "").strip().lower() if len(r) >= 2 else ""
-                enabled = enabled_raw in ("true", "1", "yes", "y")
-                return True, enabled
-        return False, False
-    except Exception:
-        return False, False
 
 
 # -----------------------------
@@ -1164,12 +1152,18 @@ if check_registry:
     existing_sheet_for_user: str | None = None
 
     if registry_ws is not None:
-        registered, enabled_registry = registry_get_sheet_status(registry_ws, sheet_id)
-        if spotify_connected and spotify_user_id:
-            try:
-                existing_sheet_for_user = find_sheet_by_spotify_user_id(registry_ws, spotify_user_id)
-            except Exception:
-                existing_sheet_for_user = None
+        try:
+            registry_snapshot = load_registry_snapshot(registry_ws)
+            registered, enabled_registry = registry_status_from_snapshot(registry_snapshot, sheet_id)
+            if spotify_connected and spotify_user_id:
+                existing_sheet_for_user = find_sheet_by_spotify_user_id(
+                    registry_ws,
+                    spotify_user_id,
+                    snapshot=registry_snapshot,
+                )
+        except Exception:
+            registered, enabled_registry = (False, False)
+            existing_sheet_for_user = None
 
     st.session_state["registry_cache"] = {
         "ts": datetime.now(timezone.utc),
@@ -1244,8 +1238,14 @@ else:
                     st.stop()
 
                 existing = None
+                registry_snapshot = None
                 try:
-                    existing = find_sheet_by_spotify_user_id(registry_ws, spotify_user_id)
+                    registry_snapshot = load_registry_snapshot(registry_ws)
+                    existing = find_sheet_by_spotify_user_id(
+                        registry_ws,
+                        spotify_user_id,
+                        snapshot=registry_snapshot,
+                    )
                 except Exception:
                     existing = None
 
@@ -1263,6 +1263,7 @@ else:
                         user_sheet_id=sheet_id,
                         enabled=True,
                         spotify_user_id=spotify_user_id,
+                        snapshot=registry_snapshot,
                     )
                 except TypeError:
                     upsert_registry_user(registry_ws, user_sheet_id=sheet_id, enabled=True)
@@ -1281,12 +1282,19 @@ else:
                     st.error("Registry sheet is not accessible to the service account.")
                     st.stop()
 
+                registry_snapshot = None
+                try:
+                    registry_snapshot = load_registry_snapshot(registry_ws)
+                except Exception:
+                    registry_snapshot = None
+
                 try:
                     upsert_registry_user(
                         registry_ws,
                         user_sheet_id=sheet_id,
                         enabled=False,
                         spotify_user_id=spotify_user_id or None,
+                        snapshot=registry_snapshot,
                     )
                 except TypeError:
                     upsert_registry_user(registry_ws, user_sheet_id=sheet_id, enabled=False)

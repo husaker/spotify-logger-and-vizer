@@ -79,30 +79,42 @@ def _find_ws_by_schema(ss: gspread.Spreadsheet, base_title: str, headers: list[s
     )
 
 
+def _col_letter(col_1based: int) -> str:
+    out = ""
+    n = col_1based
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out = chr(ord("A") + rem) + out
+    return out
+
+
 def _load_key_to_row_and_fetched(ws: gspread.Worksheet, fetched_col_1based: int) -> tuple[dict[str, int], dict[str, str]]:
     """
     Returns:
       key_to_row: id -> row index (1-based)
       key_to_fetched_at: id -> fetched_at string
     """
-    rows = ws.get_all_values()
+    fetched_col = _col_letter(fetched_col_1based)
+    key_col_values, fetched_col_values = gcall(lambda: ws.batch_get(["A:A", f"{fetched_col}:{fetched_col}"]))
+
+    keys = [r[0] if r else "" for r in key_col_values]
+    fetched_values = [r[0] if r else "" for r in fetched_col_values]
+    max_rows = max(len(keys), len(fetched_values))
     key_to_row: dict[str, int] = {}
     key_to_fetched: dict[str, str] = {}
 
-    for i, r in enumerate(rows[1:], start=2):  # skip header
-        if not r:
-            continue
-        key = (r[0] or "").strip()
+    for i in range(2, max_rows + 1):  # skip header row
+        key = (keys[i - 1] if len(keys) >= i else "").strip()
         if not key:
             continue
         key_to_row[key] = i
-        fetched = r[fetched_col_1based - 1] if len(r) >= fetched_col_1based else ""
+        fetched = fetched_values[i - 1] if len(fetched_values) >= i else ""
         key_to_fetched[key] = (fetched or "").strip()
 
     return key_to_row, key_to_fetched
 
 def _a1_row_range(row_idx: int, ncols: int) -> str:
-    end_col = chr(ord("A") + ncols - 1)
+    end_col = _col_letter(ncols)
     return f"A{row_idx}:{end_col}{row_idx}"
 
 
