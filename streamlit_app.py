@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import hmac
 import json
 import re
@@ -101,6 +102,119 @@ h1, h2, h3, h4 {{
 .small-muted {{
   color: {SPOTIFY_MUTED};
   font-size: 12px;
+}}
+.genre-card {{
+  position: relative;
+  min-height: 220px;
+  background:
+    radial-gradient(220px 140px at 100% 0%, rgba(29,185,84,0.20) 0%, rgba(29,185,84,0.00) 70%),
+    linear-gradient(180deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.02) 100%);
+  border: 1px solid {SPOTIFY_BORDER};
+  border-radius: 20px;
+  padding: 18px;
+  overflow: hidden;
+}}
+.genre-chip {{
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: {SPOTIFY_GREEN};
+  background: rgba(29,185,84,0.12);
+  border: 1px solid rgba(29,185,84,0.28);
+}}
+.genre-title {{
+  margin-top: 12px;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.1;
+}}
+.genre-stats {{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}}
+.genre-stat-label {{
+  color: {SPOTIFY_MUTED};
+  font-size: 11px;
+}}
+.genre-stat-value {{
+  margin-top: 2px;
+  font-size: 20px;
+  font-weight: 800;
+}}
+.genre-meter {{
+  margin-top: 14px;
+  width: 100%;
+  height: 8px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 999px;
+  overflow: hidden;
+}}
+.genre-meter-fill {{
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(29,185,84,0.55) 0%, rgba(29,185,84,1.0) 100%);
+}}
+.genre-artists {{
+  margin-top: 14px;
+}}
+.genre-artist-list {{
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}}
+.genre-artist {{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}}
+.genre-artist-cover {{
+  flex: 0 0 auto;
+  border-radius: 999px;
+  object-fit: cover;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: linear-gradient(135deg, rgba(29,185,84,0.28) 0%, rgba(255,255,255,0.06) 100%);
+}}
+.genre-artist-fallback {{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: {SPOTIFY_TEXT};
+  font-weight: 800;
+}}
+.genre-artist-cover--lg {{
+  width: 56px;
+  height: 56px;
+}}
+.genre-artist-cover--sm {{
+  width: 38px;
+  height: 38px;
+}}
+.genre-artist-name {{
+  line-height: 1.15;
+  font-weight: 700;
+}}
+.genre-artist-name--lg {{
+  font-size: 16px;
+}}
+.genre-artist-name--sm {{
+  font-size: 14px;
+}}
+.genre-artist-meta {{
+  margin-top: 3px;
+  color: {SPOTIFY_MUTED};
+}}
+.genre-artist-meta--lg {{
+  font-size: 12px;
+}}
+.genre-artist-meta--sm {{
+  font-size: 11px;
 }}
 </style>
 """,
@@ -420,6 +534,85 @@ def render_top_cards(items: list[dict[str, Any]], *, cols: int = 5) -> None:
                 st.markdown(f'<div class="small-muted">{it["subtitle"]}</div>', unsafe_allow_html=True)
             for line in it.get("lines", []):
                 st.markdown(f"<div>{line}</div>", unsafe_allow_html=True)
+
+
+def render_genre_cards(items: list[dict[str, Any]], *, cols: int = 3) -> None:
+    if not items:
+        st.info("No genre data for the selected range.")
+        return
+
+    grid = st.columns(cols)
+    for i, it in enumerate(items):
+        with grid[i % cols]:
+            title = html.escape(str(it.get("title") or ""))
+            plays = html.escape(str(it.get("plays") or "0"))
+            share = html.escape(str(it.get("share") or "0%"))
+            minutes = html.escape(str(it.get("minutes") or "0"))
+            meter_pct = max(0.0, min(100.0, float(it.get("meter_pct") or 0.0)))
+            artists = it.get("artists") or []
+
+            artist_rows_html: list[str] = []
+            for idx, artist in enumerate(artists[:2]):
+                artist_name_raw = str(artist.get("name") or "(Unknown artist)")
+                artist_name = html.escape(artist_name_raw)
+                artist_plays = html.escape(str(artist.get("plays") or "0"))
+                artist_cover = str(artist.get("cover") or "").strip()
+                size_cls = "genre-artist-cover--lg" if idx == 0 else "genre-artist-cover--sm"
+                name_cls = "genre-artist-name--lg" if idx == 0 else "genre-artist-name--sm"
+                meta_cls = "genre-artist-meta--lg" if idx == 0 else "genre-artist-meta--sm"
+                initial = html.escape((artist_name_raw.strip()[:1] or "?").upper())
+
+                if artist_cover:
+                    cover_html = (
+                        f'<img class="genre-artist-cover {size_cls}" '
+                        f'src="{html.escape(artist_cover)}" alt="{artist_name}" />'
+                    )
+                else:
+                    cover_html = (
+                        f'<div class="genre-artist-cover genre-artist-fallback {size_cls}">{initial}</div>'
+                    )
+
+                artist_rows_html.append(
+                    f"""
+<div class="genre-artist">
+  {cover_html}
+  <div>
+    <div class="genre-artist-name {name_cls}">{artist_name}</div>
+    <div class="genre-artist-meta {meta_cls}">{artist_plays} plays</div>
+  </div>
+</div>
+"""
+                )
+
+            artists_html = "".join(artist_rows_html)
+
+            st.markdown(
+                f"""
+<div class="genre-card">
+  <div class="genre-chip">Genre</div>
+  <div class="genre-title">{title}</div>
+  <div class="genre-meter">
+    <div class="genre-meter-fill" style="width:{meter_pct:.1f}%"></div>
+  </div>
+  <div class="small-muted" style="margin-top:8px;">{share} of selected plays</div>
+  <div class="genre-stats">
+    <div>
+      <div class="genre-stat-label">Plays</div>
+      <div class="genre-stat-value">{plays}</div>
+    </div>
+    <div>
+      <div class="genre-stat-label">Minutes</div>
+      <div class="genre-stat-value">{minutes}</div>
+    </div>
+  </div>
+  <div class="genre-artists">
+    <div class="small-muted">Top artists</div>
+    <div class="genre-artist-list">{artists_html}</div>
+  </div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
 
 # -----------------------------
 # X axis helper
@@ -1133,7 +1326,7 @@ try:
     except Exception:
         st.session_state["min_data_date"] = None
 
-    # Prepare full-history mapping for New vs Repeat (do NOT depend on selected range)
+    # Prepare full-history mapping for Discovery vs Replay (do NOT depend on selected range)
     df_hist = df_log.rename(columns={"Spotify ID": "track_id"}).copy()
     df_hist["track_id"] = df_hist["track_id"].astype(str)
     df_hist = df_hist[df_hist["track_id"].str.len() > 0].copy()
@@ -1241,8 +1434,8 @@ st.divider()
 # -----------------------------
 # Tabs
 # -----------------------------
-tab_artists, tab_tracks, tab_albums, tab_weekly, tab_genres, tab_fingerprint, tab_new_repeat = st.tabs(
-    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Weekly avg", "Top 5 Genres", "Listening fingerprint", "New vs Repeat"]
+tab_artists, tab_tracks, tab_albums, tab_genres, tab_weekly, tab_discovery_replay, tab_fingerprint = st.tabs(
+    ["Top 5 Artists", "Top 5 Tracks", "Top 5 Albums", "Top 5 Genres", "Weekly avg", "Discovery vs Replay", "Listening fingerprint"]
 )
 
 # ===== Top 5 Artists =====
@@ -1384,23 +1577,27 @@ with tab_weekly:
         axis=1,
     )
 
-    # Top album per week (by plays)
-    top_album = (
-        dfw.groupby(["week_dt", "album_id", "album_name"])
+    # Top track per week (by plays)
+    top_track = (
+        dfw.groupby(["week_dt", "track_id", "Track", "Artist"], dropna=False)
            .size()
-           .reset_index(name="plays_album")
-           .sort_values(["week_dt", "plays_album"], ascending=[True, False])
+           .reset_index(name="plays_track")
+           .sort_values(["week_dt", "plays_track", "Track", "Artist"], ascending=[True, False, True, True])
     )
-    top_album = top_album.groupby("week_dt").head(1)
+    top_track = top_track.groupby("week_dt").head(1)
 
-    cover_by_album = (
-        dfw.groupby("album_id")["album_cover_best"]
+    cover_by_track = (
+        dfw.groupby("track_id")["track_cover_url"]
            .agg(lambda s: next((x for x in s if isinstance(x, str) and x.strip()), ""))
            .to_dict()
     )
-    top_album["album_cover_url"] = top_album["album_id"].map(cover_by_album)
+    top_track["track_cover_url"] = top_track["track_id"].map(cover_by_track)
 
-    plays_w = week_agg.merge(top_album[["week_dt", "album_name", "album_cover_url"]], on="week_dt", how="left")
+    plays_w = week_agg.merge(
+        top_track[["week_dt", "Track", "Artist", "plays_track", "track_cover_url"]],
+        on="week_dt",
+        how="left",
+    )
 
     # ---- AXIS LABELS (string) + proper sorting by week_dt
     plays_w["week_label"] = plays_w["week_dt"].dt.strftime("%d.%m.%Y")  # Monday label
@@ -1411,6 +1608,9 @@ with tab_weekly:
         alt.Tooltip("avg_minutes_per_active_day:Q", title="Avg minutes / active day", format=".1f"),
         alt.Tooltip("plays:Q", title="Tracks played (total)", format=",d"),
         alt.Tooltip("active_days:Q", title="Active days", format=",d"),
+        alt.Tooltip("Track:N", title="Top track"),
+        alt.Tooltip("Artist:N", title="Artist"),
+        alt.Tooltip("plays_track:Q", title="Top track plays", format=",d"),
     ]
 
     base = alt.Chart(plays_w).encode(
@@ -1432,11 +1632,13 @@ with tab_weekly:
         tooltip=tooltip_main,
     )
 
-    img_df = plays_w[plays_w["album_cover_url"].fillna("").astype(str).str.len() > 0].copy()
+    img_df = plays_w[plays_w["track_cover_url"].fillna("").astype(str).str.len() > 0].copy()
 
     tooltip_cover = [
         alt.Tooltip("week_label:N", title="Week (Mon)"),
-        alt.Tooltip("album_name:N", title="Top album"),
+        alt.Tooltip("Track:N", title="Top track"),
+        alt.Tooltip("Artist:N", title="Artist"),
+        alt.Tooltip("plays_track:Q", title="Top track plays", format=",d"),
         alt.Tooltip("avg_tracks_per_active_day:Q", title="Avg tracks / active day", format=".2f"),
         alt.Tooltip("plays:Q", title="Tracks played (total)", format=",d"),
         alt.Tooltip("active_days:Q", title="Active days", format=",d"),
@@ -1445,7 +1647,7 @@ with tab_weekly:
     covers = alt.Chart(img_df).mark_image(width=34, height=34, dy=-26).encode(
         x=alt.X("week_label:N", sort=alt.SortField("week_dt", order="ascending")),
         y="avg_tracks_per_active_day:Q",
-        url="album_cover_url:N",
+        url="track_cover_url:N",
         tooltip=tooltip_cover,
     )
 
@@ -1461,28 +1663,59 @@ with tab_genres:
     if gen.empty:
         st.info("Genres are empty (artist cache may not be filled yet). Run cache enrichment/backfill.")
     else:
+        total_plays = len(gen)
         g = (
-            gen.groupby("primary_genre")
-            .size()
-            .reset_index(name="plays")
-            .sort_values("plays", ascending=False)
+            gen.groupby("primary_genre", dropna=False)
+            .agg(
+                plays=("track_id", "count"),
+                minutes=("minutes", "sum"),
+            )
+            .reset_index()
+            .sort_values(["plays", "minutes", "primary_genre"], ascending=[False, False, True])
             .head(5)
         )
 
-        ch = (
-            alt.Chart(g)
-            .mark_bar(color=SPOTIFY_GREEN)
-            .encode(
-                x=alt.X("plays:Q", title="Tracks"),
-                y=alt.Y("primary_genre:N", sort="-x", title=None),
-                tooltip=[
-                    alt.Tooltip("primary_genre:N", title="Genre"),
-                    alt.Tooltip("plays:Q", title="Plays", format=",d"),
-                ],
+        items: list[dict[str, Any]] = []
+        for _, row in g.iterrows():
+            genre_name = str(row["primary_genre"])
+            plays = int(row["plays"])
+            minutes = int(round(float(row["minutes"]), 0))
+            share_pct = (plays / total_plays * 100.0) if total_plays > 0 else 0.0
+
+            genre_slice = gen[gen["primary_genre"] == genre_name].copy()
+            top_artists = (
+                genre_slice.groupby("Artist", dropna=False)
+                .agg(
+                    plays=("track_id", "count"),
+                    minutes=("minutes", "sum"),
+                    cover=("artist_cover_best", lambda s: next((x for x in s if isinstance(x, str) and x.strip()), "")),
+                )
+                .reset_index()
+                .sort_values(["plays", "minutes", "Artist"], ascending=[False, False, True])
+                .head(2)
             )
-            .properties(height=300)
-        )
-        st.altair_chart(ch, width="stretch")
+
+            artist_items = [
+                {
+                    "name": str(a["Artist"]).strip() or "(Unknown artist)",
+                    "plays": f"{int(a['plays']):,}",
+                    "cover": str(a["cover"] or "").strip(),
+                }
+                for _, a in top_artists.iterrows()
+            ]
+
+            items.append(
+                {
+                    "title": genre_name,
+                    "plays": f"{plays:,}",
+                    "share": f"{share_pct:.1f}%",
+                    "minutes": f"{minutes:,}",
+                    "meter_pct": share_pct,
+                    "artists": artist_items,
+                }
+            )
+
+        render_genre_cards(items, cols=3)
 
 # ===== Listening fingerprint (day of week × hour heatmap) =====
 with tab_fingerprint:
@@ -1576,152 +1809,123 @@ with tab_fingerprint:
 
         st.altair_chart(ch, width="stretch")
 
-# ===== New vs Repeat =====
-with tab_new_repeat:
-    st.markdown("### New vs Repeat")
+# ===== Discovery vs Replay =====
+with tab_discovery_replay:
+    st.markdown("### Discovery vs Replay")
     st.markdown(
-        '<div class="small-muted">New = first time a track appears in your whole log. Repeat = all other plays.</div>',
+        '<div class="small-muted">New = first time a track appears in your whole log. Repeat = all other plays. The line shows exploration score = share of new unique tracks.</div>',
         unsafe_allow_html=True,
     )
 
-    col_a, col_b = st.columns([1, 1.4])
-    with col_a:
-        grain = st.selectbox("Granularity", ["Week", "Month"], index=0, key="new_repeat_grain")
-    with col_b:
-        mode = st.selectbox("Metric", ["Plays", "Minutes", "Unique tracks"], index=0, key="new_repeat_mode")
+    grain = st.selectbox("Granularity", ["Week", "Month"], index=0, key="discovery_replay_grain")
 
-    dnr = df[["track_id", "played_at_utc", "minutes"]].copy()
-    dnr = dnr.merge(first_play, on="track_id", how="left")
+    df_dr = df[["track_id", "played_at_utc"]].copy()
+    df_dr = df_dr.merge(first_play, on="track_id", how="left")
 
     # Bucket in LOCAL time (naive for to_period)
-    played_local_naive = dnr["played_at_utc"].dt.tz_convert(tz).dt.tz_localize(None)
-    first_local_naive = dnr["first_play_utc"].dt.tz_convert(tz).dt.tz_localize(None)
+    played_local_naive = df_dr["played_at_utc"].dt.tz_convert(tz).dt.tz_localize(None)
+    first_local_naive = df_dr["first_play_utc"].dt.tz_convert(tz).dt.tz_localize(None)
 
     if grain == "Month":
-        dnr["bucket"] = played_local_naive.dt.to_period("M").dt.to_timestamp()
-        dnr["first_bucket"] = first_local_naive.dt.to_period("M").dt.to_timestamp()
+        df_dr["bucket"] = played_local_naive.dt.to_period("M").dt.to_timestamp()
+        df_dr["first_bucket"] = first_local_naive.dt.to_period("M").dt.to_timestamp()
     else:
         # week starting Monday
-        dnr["bucket"] = played_local_naive.dt.to_period("W-MON").dt.start_time
-        dnr["first_bucket"] = first_local_naive.dt.to_period("W-MON").dt.start_time
+        df_dr["bucket"] = played_local_naive.dt.to_period("W-MON").dt.start_time
+        df_dr["first_bucket"] = first_local_naive.dt.to_period("W-MON").dt.start_time
 
-    dnr["is_new"] = dnr["bucket"] == dnr["first_bucket"]
-    dnr["type"] = dnr["is_new"].map({True: "New", False: "Repeat"})
+    df_dr["is_new"] = df_dr["bucket"] == df_dr["first_bucket"]
+    df_dr["type"] = df_dr["is_new"].map({True: "New", False: "Repeat"})
 
-    # -----------------------
-    # 1) PLAYS: stacked bars + New share line (%)
-    # -----------------------
-    if mode == "Plays":
-        agg_wide = (
-            dnr.groupby(["bucket", "type"], dropna=False)
-            .size()
-            .reset_index(name="plays")
-            .pivot_table(index="bucket", columns="type", values="plays", fill_value=0)
-            .reset_index()
-        )
+    uniq_all = df_dr.groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_all")
+    uniq_new = df_dr[df_dr["is_new"]].groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_new")
+    agg_u = uniq_all.merge(uniq_new, on="bucket", how="left").fillna({"uniq_new": 0})
+    agg_u["uniq_repeat"] = (agg_u["uniq_all"] - agg_u["uniq_new"]).clip(lower=0)
 
-        # Ensure both columns exist
-        if "New" not in agg_wide.columns:
-            agg_wide["New"] = 0
-        if "Repeat" not in agg_wide.columns:
-            agg_wide["Repeat"] = 0
-
-        agg_wide["total"] = agg_wide["New"] + agg_wide["Repeat"]
-        agg_wide["new_share"] = agg_wide.apply(
-            lambda r: (r["New"] / r["total"]) if r["total"] > 0 else 0.0,
+    if agg_u.empty:
+        st.info("Not enough data for the selected range.")
+    else:
+        agg_u["bucket_dt"] = pd.to_datetime(agg_u["bucket"]).dt.normalize()
+        agg_u["exploration_score"] = agg_u.apply(
+            lambda r: (r["uniq_new"] / r["uniq_all"]) if r["uniq_all"] > 0 else 0.0,
             axis=1,
         )
 
-        # ---- Critical: bucket_dt for X axis (ordinal)
-        agg_wide["bucket_dt"] = pd.to_datetime(agg_wide["bucket"]).dt.normalize()
-
-        # Exploration score (weighted by plays) = total_new / total_plays
-        total_all = float(agg_wide["total"].sum())
-        exploration_score = (float(agg_wide["New"].sum()) / total_all) if total_all > 0 else 0.0
-
-        st.markdown(
-            f"""
-    <div class="spotify-card" style="margin-bottom:12px;">
-      <div class="kpi-label">Exploration score (New share, weighted by plays)</div>
-      <div class="kpi">{exploration_score * 100:.1f}%</div>
-      <div class="small-muted">Higher = you spend more time discovering new tracks.</div>
-    </div>
-    """,
-            unsafe_allow_html=True,
-        )
-
-        # long for stacked bars
-        bars_df = agg_wide.melt(
-            id_vars=["bucket", "bucket_dt", "total", "new_share"],
-            value_vars=["New", "Repeat"],
-            var_name="type",
-            value_name="value",
+        bars_df = pd.concat(
+            [
+                agg_u[["bucket", "bucket_dt", "uniq_all", "exploration_score"]].assign(
+                    type="New",
+                    value=agg_u["uniq_new"],
+                ),
+                agg_u[["bucket", "bucket_dt", "uniq_all", "exploration_score"]].assign(
+                    type="Repeat",
+                    value=agg_u["uniq_repeat"],
+                ),
+            ],
+            ignore_index=True,
         )
 
         color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
+        tooltip_bars = [
+            period_tooltip(),
+            alt.Tooltip("type:N", title="Type"),
+            alt.Tooltip("value:Q", title="Unique tracks", format=",d"),
+            alt.Tooltip("uniq_all:Q", title="Total unique tracks", format=",d"),
+            alt.Tooltip("exploration_score:Q", title="Exploration score", format=".1%"),
+        ]
+        tooltip_line = [
+            period_tooltip(),
+            alt.Tooltip("exploration_score:Q", title="Exploration score", format=".1%"),
+            alt.Tooltip("uniq_new:Q", title="New unique tracks", format=",d"),
+            alt.Tooltip("uniq_repeat:Q", title="Repeat unique tracks", format=",d"),
+            alt.Tooltip("uniq_all:Q", title="Total unique tracks", format=",d"),
+        ]
 
-        # --- Top chart: New share line + points
-        line_df = agg_wide[["bucket_dt", "new_share", "New", "Repeat", "total"]].copy()
-
-        share_line = (
-            alt.Chart(line_df)
-            .mark_line(color=SPOTIFY_GREEN, strokeWidth=2.5)
-            .encode(
-                x=x_bucket(grain),
-                y=alt.Y(
-                    "new_share:Q",
-                    title="New share",
-                    scale=alt.Scale(domain=[0, 1]),
-                    axis=alt.Axis(format="%"),
-                ),
-                tooltip=[
-                    period_tooltip(),
-                    alt.Tooltip("new_share:Q", title="New share", format=".1%"),
-                    alt.Tooltip("New:Q", title="New plays", format=",d"),
-                    alt.Tooltip("Repeat:Q", title="Repeat plays", format=",d"),
-                    alt.Tooltip("total:Q", title="Total plays", format=",d"),
-                ],
-            )
-        )
-
-        share_points = (
-            alt.Chart(line_df)
-            .mark_point(color=SPOTIFY_GREEN, size=75, filled=True)
-            .encode(
-                x=x_bucket(grain),
-                y=alt.Y("new_share:Q", scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format="%")),
-                tooltip=[
-                    period_tooltip(),
-                    alt.Tooltip("new_share:Q", title="New share", format=".1%"),
-                ],
-            )
-        )
-
-        share_chart = (share_line + share_points).properties(height=150)
-
-        # --- Bottom chart: stacked bars (plays)
         bars = (
             alt.Chart(bars_df)
             .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
             .encode(
                 x=x_bucket(grain),
-                y=alt.Y("value:Q", title="Plays", stack=True),
+                y=alt.Y("value:Q", title="Unique tracks", stack=True),
                 color=alt.Color("type:N", title=None, scale=color_scale),
-                tooltip=[
-                    period_tooltip(),
-                    alt.Tooltip("type:N", title="Type"),
-                    alt.Tooltip("value:Q", title="Plays", format=",d"),
-                    alt.Tooltip("total:Q", title="Total plays", format=",d"),
-                    alt.Tooltip("new_share:Q", title="New share", format=".1%"),
-                ],
+                tooltip=tooltip_bars,
             )
-            .properties(height=260)
         )
 
-        combo = (
-            alt.vconcat(share_chart, bars, spacing=6)
-            .resolve_scale(x="shared")
-            .configure_view(fill=SPOTIFY_BG, strokeOpacity=0)
+        line = (
+            alt.Chart(agg_u)
+            .mark_line(color=SPOTIFY_TEXT, strokeWidth=2.5)
+            .encode(
+                x=x_bucket(grain),
+                y=alt.Y(
+                    "exploration_score:Q",
+                    title="Exploration score",
+                    scale=alt.Scale(domain=[0, 1]),
+                    axis=alt.Axis(format="%", orient="right"),
+                ),
+                tooltip=tooltip_line,
+            )
+        )
+
+        points = (
+            alt.Chart(agg_u)
+            .mark_point(color=SPOTIFY_TEXT, size=75, filled=True)
+            .encode(
+                x=x_bucket(grain),
+                y=alt.Y(
+                    "exploration_score:Q",
+                    scale=alt.Scale(domain=[0, 1]),
+                    axis=alt.Axis(format="%", orient="right"),
+                ),
+                tooltip=tooltip_line,
+            )
+        )
+
+        ch = (
+            alt.layer(bars, line, points)
+            .resolve_scale(y="independent")
+            .properties(height=520, background=SPOTIFY_BG)
+            .configure_view(strokeOpacity=0)
             .configure_axis(
                 labelColor=SPOTIFY_MUTED,
                 titleColor=SPOTIFY_MUTED,
@@ -1732,101 +1936,4 @@ with tab_new_repeat:
             .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
         )
 
-        st.altair_chart(combo, width="stretch")
-
-    # -----------------------
-    # 2) MINUTES: stacked bars
-    # -----------------------
-    elif mode == "Minutes":
-        agg = (
-            dnr.groupby(["bucket", "type"], dropna=False)
-            .agg(value=("minutes", "sum"))
-            .reset_index()
-        )
-
-        if agg.empty:
-            st.info("Not enough data for the selected range.")
-        else:
-            agg["bucket_dt"] = pd.to_datetime(agg["bucket"]).dt.normalize()
-
-            color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
-            tooltip_nr = [
-                period_tooltip(),
-                alt.Tooltip("type:N", title="Type"),
-                alt.Tooltip("value:Q", title="Minutes", format=".1f"),
-            ]
-
-            ch = (
-                alt.Chart(agg)
-                .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
-                .encode(
-                    x=x_bucket(grain),
-                    y=alt.Y("value:Q", title="Minutes", stack=True),
-                    color=alt.Color("type:N", title=None, scale=color_scale),
-                    tooltip=tooltip_nr,
-                )
-                .properties(height=360, background=SPOTIFY_BG)
-                .configure_view(strokeOpacity=0)
-                .configure_axis(
-                    labelColor=SPOTIFY_MUTED,
-                    titleColor=SPOTIFY_MUTED,
-                    gridColor=SPOTIFY_BORDER,
-                    tickColor=SPOTIFY_BORDER,
-                    domainColor=SPOTIFY_BORDER,
-                )
-                .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
-            )
-
-            st.altair_chart(ch, width="stretch")
-
-    # -----------------------
-    # 3) UNIQUE TRACKS: stacked bars
-    # -----------------------
-    else:
-        uniq_all = dnr.groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_all")
-        uniq_new = dnr[dnr["is_new"]].groupby(["bucket"])["track_id"].nunique().reset_index(name="uniq_new")
-        agg_u = uniq_all.merge(uniq_new, on="bucket", how="left").fillna({"uniq_new": 0})
-        agg_u["uniq_repeat"] = (agg_u["uniq_all"] - agg_u["uniq_new"]).clip(lower=0)
-
-        agg = pd.concat(
-            [
-                agg_u[["bucket"]].assign(type="New", value=agg_u["uniq_new"]),
-                agg_u[["bucket"]].assign(type="Repeat", value=agg_u["uniq_repeat"]),
-            ],
-            ignore_index=True,
-        )
-
-        if agg.empty:
-            st.info("Not enough data for the selected range.")
-        else:
-            agg["bucket_dt"] = pd.to_datetime(agg["bucket"]).dt.normalize()
-
-            color_scale = alt.Scale(domain=["New", "Repeat"], range=[SPOTIFY_GREEN, SPOTIFY_BORDER])
-            tooltip_nr = [
-                period_tooltip(),
-                alt.Tooltip("type:N", title="Type"),
-                alt.Tooltip("value:Q", title="Unique tracks", format=",d"),
-            ]
-
-            ch = (
-                alt.Chart(agg)
-                .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
-                .encode(
-                    x=x_bucket(grain),
-                    y=alt.Y("value:Q", title="Unique tracks", stack=True),
-                    color=alt.Color("type:N", title=None, scale=color_scale),
-                    tooltip=tooltip_nr,
-                )
-                .properties(height=360, background=SPOTIFY_BG)
-                .configure_view(strokeOpacity=0)
-                .configure_axis(
-                    labelColor=SPOTIFY_MUTED,
-                    titleColor=SPOTIFY_MUTED,
-                    gridColor=SPOTIFY_BORDER,
-                    tickColor=SPOTIFY_BORDER,
-                    domainColor=SPOTIFY_BORDER,
-                )
-                .configure_legend(labelColor=SPOTIFY_MUTED, titleColor=SPOTIFY_MUTED)
-            )
-
-            st.altair_chart(ch, width="stretch")
+        st.altair_chart(ch, width="stretch")
