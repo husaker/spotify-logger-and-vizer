@@ -43,6 +43,7 @@ SPOTIFY_CARD = "#181818"
 SPOTIFY_TEXT = "#FFFFFF"
 SPOTIFY_MUTED = "#B3B3B3"
 SPOTIFY_BORDER = "#2A2A2A"
+DISCOVERY_ACCENT = "#95E5A1"
 
 # Cover size on Top 5 tabs
 COVER_W = 150
@@ -105,38 +106,37 @@ h1, h2, h3, h4 {{
 }}
 .genre-card {{
   position: relative;
-  min-height: 220px;
+  min-height: 188px;
   background:
     radial-gradient(220px 140px at 100% 0%, rgba(29,185,84,0.20) 0%, rgba(29,185,84,0.00) 70%),
     linear-gradient(180deg, rgba(255,255,255,0.035) 0%, rgba(255,255,255,0.02) 100%);
   border: 1px solid {SPOTIFY_BORDER};
-  border-radius: 20px;
-  padding: 18px;
+  border-radius: 18px;
+  padding: 14px;
   overflow: hidden;
 }}
 .genre-chip {{
   display: inline-block;
-  padding: 4px 10px;
+  padding: 3px 8px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: {SPOTIFY_GREEN};
   background: rgba(29,185,84,0.12);
   border: 1px solid rgba(29,185,84,0.28);
 }}
 .genre-title {{
-  margin-top: 12px;
-  font-size: 24px;
+  margin-top: 10px;
+  font-size: 21px;
   font-weight: 800;
   line-height: 1.1;
 }}
 .genre-stats {{
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 14px;
+  gap: 10px;
+  margin-top: 12px;
 }}
 .genre-stat-label {{
   color: {SPOTIFY_MUTED};
@@ -144,35 +144,22 @@ h1, h2, h3, h4 {{
 }}
 .genre-stat-value {{
   margin-top: 2px;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 800;
 }}
-.genre-meter {{
-  margin-top: 14px;
-  width: 100%;
-  height: 8px;
-  background: rgba(255,255,255,0.07);
-  border-radius: 999px;
-  overflow: hidden;
-}}
-.genre-meter-fill {{
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, rgba(29,185,84,0.55) 0%, rgba(29,185,84,1.0) 100%);
-}}
 .genre-artists {{
-  margin-top: 14px;
+  margin-top: 12px;
 }}
 .genre-artist-list {{
-  margin-top: 10px;
+  margin-top: 8px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }}
 .genre-artist {{
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }}
 .genre-artist-cover {{
   flex: 0 0 auto;
@@ -189,32 +176,32 @@ h1, h2, h3, h4 {{
   font-weight: 800;
 }}
 .genre-artist-cover--lg {{
-  width: 56px;
-  height: 56px;
+  width: 46px;
+  height: 46px;
 }}
 .genre-artist-cover--sm {{
-  width: 38px;
-  height: 38px;
+  width: 30px;
+  height: 30px;
 }}
 .genre-artist-name {{
   line-height: 1.15;
   font-weight: 700;
 }}
 .genre-artist-name--lg {{
-  font-size: 16px;
+  font-size: 14px;
 }}
 .genre-artist-name--sm {{
-  font-size: 14px;
+  font-size: 12px;
 }}
 .genre-artist-meta {{
   margin-top: 3px;
   color: {SPOTIFY_MUTED};
 }}
 .genre-artist-meta--lg {{
-  font-size: 12px;
+  font-size: 11px;
 }}
 .genre-artist-meta--sm {{
-  font-size: 11px;
+  font-size: 10px;
 }}
 </style>
 """,
@@ -536,19 +523,19 @@ def render_top_cards(items: list[dict[str, Any]], *, cols: int = 5) -> None:
                 st.markdown(f"<div>{line}</div>", unsafe_allow_html=True)
 
 
-def render_genre_cards(items: list[dict[str, Any]], *, cols: int = 3) -> None:
+def render_genre_cards(items: list[dict[str, Any]], *, cols: int = 5) -> None:
     if not items:
         st.info("No genre data for the selected range.")
         return
 
-    grid = st.columns(cols)
+    grid = st.columns(max(1, min(cols, len(items))))
     for i, it in enumerate(items):
-        with grid[i % cols]:
+        with grid[i % len(grid)]:
+            rank = html.escape(str(it.get("rank") or ""))
             title = html.escape(str(it.get("title") or ""))
             plays = html.escape(str(it.get("plays") or "0"))
             share = html.escape(str(it.get("share") or "0%"))
             minutes = html.escape(str(it.get("minutes") or "0"))
-            meter_pct = max(0.0, min(100.0, float(it.get("meter_pct") or 0.0)))
             artists = it.get("artists") or []
 
             artist_rows_html: list[str] = []
@@ -589,12 +576,9 @@ def render_genre_cards(items: list[dict[str, Any]], *, cols: int = 3) -> None:
             st.markdown(
                 f"""
 <div class="genre-card">
-  <div class="genre-chip">Genre</div>
+  <div class="genre-chip">{rank}</div>
   <div class="genre-title">{title}</div>
-  <div class="genre-meter">
-    <div class="genre-meter-fill" style="width:{meter_pct:.1f}%"></div>
-  </div>
-  <div class="small-muted" style="margin-top:8px;">{share} of selected plays</div>
+  <div class="small-muted" style="margin-top:8px;">{share} of plays</div>
   <div class="genre-stats">
     <div>
       <div class="genre-stat-label">Plays</div>
@@ -1676,7 +1660,7 @@ with tab_genres:
         )
 
         items: list[dict[str, Any]] = []
-        for _, row in g.iterrows():
+        for rank, (_, row) in enumerate(g.iterrows(), start=1):
             genre_name = str(row["primary_genre"])
             plays = int(row["plays"])
             minutes = int(round(float(row["minutes"]), 0))
@@ -1706,16 +1690,16 @@ with tab_genres:
 
             items.append(
                 {
+                    "rank": rank,
                     "title": genre_name,
                     "plays": f"{plays:,}",
                     "share": f"{share_pct:.1f}%",
                     "minutes": f"{minutes:,}",
-                    "meter_pct": share_pct,
                     "artists": artist_items,
                 }
             )
 
-        render_genre_cards(items, cols=3)
+        render_genre_cards(items, cols=5)
 
 # ===== Listening fingerprint (day of week × hour heatmap) =====
 with tab_fingerprint:
@@ -1831,8 +1815,10 @@ with tab_discovery_replay:
         df_dr["first_bucket"] = first_local_naive.dt.to_period("M").dt.to_timestamp()
     else:
         # week starting Monday
-        df_dr["bucket"] = played_local_naive.dt.to_period("W-MON").dt.start_time
-        df_dr["first_bucket"] = first_local_naive.dt.to_period("W-MON").dt.start_time
+        played_day = played_local_naive.dt.normalize()
+        first_day = first_local_naive.dt.normalize()
+        df_dr["bucket"] = (played_day - pd.to_timedelta(played_day.dt.weekday, unit="D")).dt.normalize()
+        df_dr["first_bucket"] = (first_day - pd.to_timedelta(first_day.dt.weekday, unit="D")).dt.normalize()
 
     df_dr["is_new"] = df_dr["bucket"] == df_dr["first_bucket"]
     df_dr["type"] = df_dr["is_new"].map({True: "New", False: "Repeat"})
@@ -1894,26 +1880,12 @@ with tab_discovery_replay:
 
         line = (
             alt.Chart(agg_u)
-            .mark_line(color=SPOTIFY_TEXT, strokeWidth=2.5)
+            .mark_line(color=DISCOVERY_ACCENT, strokeWidth=2.75)
             .encode(
                 x=x_bucket(grain),
                 y=alt.Y(
                     "exploration_score:Q",
-                    title="Exploration score",
-                    scale=alt.Scale(domain=[0, 1]),
-                    axis=alt.Axis(format="%", orient="right"),
-                ),
-                tooltip=tooltip_line,
-            )
-        )
-
-        points = (
-            alt.Chart(agg_u)
-            .mark_point(color=SPOTIFY_TEXT, size=75, filled=True)
-            .encode(
-                x=x_bucket(grain),
-                y=alt.Y(
-                    "exploration_score:Q",
+                    title=None,
                     scale=alt.Scale(domain=[0, 1]),
                     axis=alt.Axis(format="%", orient="right"),
                 ),
@@ -1922,7 +1894,7 @@ with tab_discovery_replay:
         )
 
         ch = (
-            alt.layer(bars, line, points)
+            alt.layer(bars, line)
             .resolve_scale(y="independent")
             .properties(height=520, background=SPOTIFY_BG)
             .configure_view(strokeOpacity=0)
