@@ -8,6 +8,7 @@ from common.config import load_settings
 from worker.registry import (
     REGISTRY_TAB,
     ensure_registry_headers,
+    load_registry_snapshot,
     read_registry,
     upsert_registry_user,
     update_registry_status,
@@ -43,9 +44,11 @@ def main() -> None:
     # Determine which sheets to sync
     if args.sheet:
         sheet_ids = [args.sheet]
+        registry_snapshot = load_registry_snapshot(registry_ws)
         print("🎯 Target sheet:", args.sheet)
     else:
-        users = read_registry(registry_ws)
+        registry_snapshot = load_registry_snapshot(registry_ws)
+        users = read_registry(registry_ws, snapshot=registry_snapshot)
         enabled_users = [u for u in users if u.enabled]
         sheet_ids = [u.user_sheet_id for u in enabled_users]
 
@@ -85,6 +88,7 @@ def main() -> None:
                 user_sheet_id=sid,
                 last_sync_at=now,
                 last_error="",
+                snapshot=registry_snapshot,
             )
 
             print(f"✅ Synced {sid}: +{added} rows")
@@ -95,6 +99,7 @@ def main() -> None:
                 user_sheet_id=sid,
                 last_sync_at=None,
                 last_error=str(e),
+                snapshot=registry_snapshot,
             )
             print(f"❌ Sync failed for {sid}: {e}")
 
