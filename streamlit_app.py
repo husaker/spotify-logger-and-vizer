@@ -1572,9 +1572,18 @@ with tab_plays:
         alt.Tooltip("plays_track:Q", title="Top track plays", format=",d"),
     ]
 
-    bars = (
+    line = (
         alt.Chart(plays_view)
-        .mark_bar(color=SPOTIFY_GREEN, cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .mark_line(color=SPOTIFY_GREEN, strokeWidth=3)
+        .encode(
+            x=x_bucket(plays_grain),
+            y=alt.Y("plays:Q", title="Plays"),
+        )
+    )
+
+    points = (
+        alt.Chart(plays_view)
+        .mark_circle(size=90, color=SPOTIFY_GREEN, stroke=SPOTIFY_BG, strokeWidth=2)
         .encode(
             x=x_bucket(plays_grain),
             y=alt.Y("plays:Q", title="Plays"),
@@ -1594,7 +1603,7 @@ with tab_plays:
 
     covers = (
         alt.Chart(img_df)
-        .mark_image(width=32, height=32, dy=-22)
+        .mark_image(width=42, height=42, dy=-30)
         .encode(
             x=x_bucket(plays_grain),
             y="plays:Q",
@@ -1604,7 +1613,7 @@ with tab_plays:
     )
 
     plays_chart = (
-        alt.layer(bars, covers)
+        alt.layer(line, points, covers)
         .properties(height=500, background=SPOTIFY_BG)
         .configure_view(strokeOpacity=0)
         .configure_axis(
