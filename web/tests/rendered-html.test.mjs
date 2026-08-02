@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function worker() {
@@ -18,6 +19,16 @@ test("server-renders the finished public dashboard shell", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
   assert.equal(response.headers.get("x-frame-options"), "DENY");
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+
+  const assetsDirectory = new URL("../dist/client/assets/", import.meta.url);
+  const dashboardAsset = (await readdir(assetsDirectory)).find((name) => name.startsWith("dashboard-client-") && name.endsWith(".js"));
+  assert.ok(dashboardAsset);
+  const dashboardSource = await readFile(new URL(dashboardAsset, assetsDirectory), "utf8");
+  assert.match(dashboardSource, /Listening universe/i);
+  assert.match(dashboardSource, /Album-cover mosaic/i);
+  assert.match(dashboardSource, /square-packed treemap/i);
+  assert.doesNotMatch(dashboardSource, /mosaic-caption/i);
+  assert.match(dashboardSource, /Ctrl\/⌘ \+ scroll to zoom/i);
 });
 
 test("server-renders the protected admin surface without exposing secrets", async () => {
@@ -35,4 +46,16 @@ test("API fails closed when runtime configuration is absent", async () => {
   assert.equal(dashboard.status, 503);
   const admin = await app.fetch(new Request("http://localhost/api/admin/status"), env, context);
   assert.equal(admin.status, 401);
+});
+
+test("scheduled sync endpoint requires its dedicated bearer secret", async () => {
+  const app = await worker();
+  const cronEnv = { ...env, CRON_SECRET: "test-cron-secret" };
+  const missing = await app.fetch(new Request("http://localhost/api/cron/sync", { method: "POST" }), cronEnv, context);
+  assert.equal(missing.status, 401);
+  const incorrect = await app.fetch(new Request("http://localhost/api/cron/sync", {
+    method: "POST",
+    headers: { authorization: "Bearer wrong-secret" },
+  }), cronEnv, context);
+  assert.equal(incorrect.status, 401);
 });

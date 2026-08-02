@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activity, activityStats, delta, discoverySeries, enrich, fingerprint, inRange, metrics, previousRange, rangeForPreset, weeklySeries } from "../lib/analytics.ts";
+import { activity, activityStats, albumMosaic, delta, discoverySeries, enrich, fingerprint, inRange, listeningUniverse, metrics, mosaicPeriodOptions, previousRange, rangeForPreset, weeklySeries } from "../lib/analytics.ts";
 
 const payload = {
   configured: true, generatedAt: "2026-08-02T00:00:00Z", timezone: "Europe/Moscow", stale: false,
   lastSyncAt: null, reauthorizationRequired: false,
   plays: [
     { playedAt: "2026-08-01T21:30:00Z", trackId: "a", trackName: "A", artistName: "One", trackUrl: "" },
-    { playedAt: "2026-08-02T20:00:00Z", trackId: "a", trackName: "A", artistName: "One", trackUrl: "" },
-    { playedAt: "2026-08-02T21:00:00Z", trackId: "b", trackName: "B", artistName: "Two", trackUrl: "" },
+    { playedAt: "2026-08-02T20:50:00Z", trackId: "a", trackName: "A", artistName: "One", trackUrl: "" },
+    { playedAt: "2026-08-02T21:10:00Z", trackId: "b", trackName: "B", artistName: "Two", trackUrl: "" },
   ],
   tracks: {
     a: { id: "a", name: "A", durationMs: 180000, albumId: "x", coverUrl: "", primaryArtistId: "one" },
@@ -57,4 +57,40 @@ test("time series covers the complete selected range including empty buckets", (
   assert.equal(discovery.length, weekly.length);
   assert.equal(discovery.at(-1)?.fresh, 0);
   assert.equal(discovery.at(-1)?.replay, 0);
+});
+
+test("listening universe sizes artists and counts consecutive transitions", () => {
+  const universePayload = { ...payload, plays: [
+    { ...payload.plays[1], playedAt: "2026-08-02T20:00:00Z" },
+    { ...payload.plays[2], playedAt: "2026-08-02T20:10:00Z" },
+    { ...payload.plays[1], playedAt: "2026-08-02T20:20:00Z" },
+  ] };
+  const graph = listeningUniverse(enrich(universePayload));
+  assert.deepEqual(graph.nodes.map((node) => [node.name, node.plays, Math.round(node.minutes)]), [["One", 2, 6], ["Two", 1, 4]]);
+  assert.deepEqual(graph.edges, [{ source: "one", target: "two", weight: 2 }]);
+  assert.equal(graph.nodes.find((node) => node.id === "one")?.connections, 2);
+
+  const separated = listeningUniverse(enrich({ ...payload, plays: [payload.plays[1], { ...payload.plays[2], playedAt: "2026-08-02T21:21:00Z" }] }));
+  assert.deepEqual(separated.edges, []);
+  assert.deepEqual(separated.nodes, []);
+
+  const uncappedPlays = Array.from({ length: 44 }, (_, index) => {
+    const artist = index % 22;
+    return { playedAt: new Date(Date.UTC(2026, 7, 1, 0, index * 5)).toISOString(), artistId: `artist-${artist}`, artistName: `Artist ${artist}`, artistCoverUrl: "", minutes: 3 };
+  });
+  const uncapped = listeningUniverse(uncappedPlays);
+  assert.equal(uncapped.nodes.length, 22);
+  assert.equal(uncapped.edges.length, 21);
+});
+
+test("album mosaic aggregates listening time and offers Moscow-time periods", () => {
+  const plays = enrich(payload);
+  assert.deepEqual(albumMosaic(plays).map((album) => [album.name, album.plays, Math.round(album.minutes)]), [["X", 2, 6], ["Y", 1, 4]]);
+  const options = mosaicPeriodOptions(plays);
+  assert.ok(options.some((option) => option.value === "season:2026:summer" && option.label === "Summer 2026"));
+  assert.ok(options.some((option) => option.value === "month:2026-08" && option.label === "August 2026"));
+  assert.equal(albumMosaic(plays, "month:2026-08").length, 2);
+  assert.equal(albumMosaic(plays, "season:2026:autumn").length, 0);
+  const manyAlbums = Array.from({ length: 55 }, (_, index) => ({ albumId: `album-${index}`, albumName: `Album ${index}`, artistName: "Artist", coverUrl: "", minutes: index + 1 }));
+  assert.equal(albumMosaic(manyAlbums).length, 48);
 });
