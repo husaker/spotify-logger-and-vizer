@@ -1,2 +1,15 @@
+# Local secrets and credentials
 .env
+.env.*
 secrets/
+
+# Local development environments
+.venv/
+.idea/
+
+# Python artifacts left by the retired implementation
+__pycache__/
+*.py[cod]
+
+# Operating-system metadata
+.DS_Store

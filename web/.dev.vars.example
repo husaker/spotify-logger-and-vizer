@@ -1,0 +1,12 @@
+GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","client_email":"...","private_key":"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n","token_uri":"https://oauth2.googleapis.com/token"}
+USER_SHEET_ID=your_google_sheet_id
+SPOTIFY_CLIENT_ID=your_spotify_client_id
+SPOTIFY_CLIENT_SECRET=your_spotify_client_secret
+TOKEN_ENCRYPTION_KEY=base64url_encoded_32_byte_key
+ADMIN_PASSWORD=use_a_long_unique_password
+SESSION_SIGNING_KEY=use_a_long_random_secret
+PUBLIC_APP_URL=https://your-site.example
+TELEGRAM_BOT_TOKEN=token_from_botfather
+TELEGRAM_WEBHOOK_SECRET=use_another_long_random_secret
+DEMO_MODE=false
+SCHEDULED_SYNC_ENABLED=false
