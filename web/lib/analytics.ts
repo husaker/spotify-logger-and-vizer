@@ -83,6 +83,12 @@ export function delta(current: number, previous: number): number | null {
 }
 
 export type RankedItem = { id: string; name: string; subtitle: string; coverUrl: string; plays: number; minutes: number };
+export type UniverseNode = { id: string; name: string; coverUrl: string; plays: number; minutes: number; connections: number };
+export type UniverseEdge = { source: string; target: string; weight: number };
+export type UniverseGraph = { nodes: UniverseNode[]; edges: UniverseEdge[] };
+export type MosaicPeriod = "all" | `month:${string}` | `season:${number}:${"winter" | "spring" | "summer" | "autumn"}`;
+export type MosaicPeriodOption = { value: Exclude<MosaicPeriod, "all">; label: string; kind: "season" | "month"; sortKey: string };
+export type MosaicAlbum = { id: string; name: string; artistName: string; coverUrl: string; plays: number; minutes: number };
 
 function rankBy(plays: EnrichedPlay[], key: (play: EnrichedPlay) => string, item: (play: EnrichedPlay) => Omit<RankedItem, "plays" | "minutes">): RankedItem[] {
   const map = new Map<string, RankedItem>();
@@ -104,6 +110,123 @@ export function rankings(plays: EnrichedPlay[]) {
     albums: rankBy(plays, (play) => play.albumId, (play) => ({ id: play.albumId, name: play.albumName, subtitle: "Album", coverUrl: play.coverUrl })),
     genres: rankBy(plays, (play) => play.genre, (play) => ({ id: play.genre, name: play.genre, subtitle: "Genre", coverUrl: play.artistCoverUrl })),
   };
+}
+
+function artistKey(play: EnrichedPlay): string {
+  return play.artistId || play.artistName;
+}
+
+export function listeningUniverse(plays: EnrichedPlay[], minimumTransitionWeight = 2): UniverseGraph {
+  const maximumTransitionGapMs = 30 * 60 * 1000;
+  const totals = new Map<string, UniverseNode>();
+  for (const play of plays) {
+    const id = artistKey(play);
+    if (!id) continue;
+    const current = totals.get(id) ?? {
+      id,
+      name: play.artistName || "Unknown artist",
+      coverUrl: play.artistCoverUrl,
+      plays: 0,
+      minutes: 0,
+      connections: 0,
+    };
+    current.plays += 1;
+    current.minutes += play.minutes;
+    if (!current.coverUrl && play.artistCoverUrl) current.coverUrl = play.artistCoverUrl;
+    totals.set(id, current);
+  }
+
+  const edgeMap = new Map<string, UniverseEdge>();
+  const chronological = [...plays].sort((a, b) => Date.parse(a.playedAt) - Date.parse(b.playedAt));
+  for (let index = 1; index < chronological.length; index++) {
+    const previous = chronological[index - 1];
+    const current = chronological[index];
+    const gap = Date.parse(current.playedAt) - Date.parse(previous.playedAt);
+    if (!Number.isFinite(gap) || gap > maximumTransitionGapMs) continue;
+    const source = artistKey(previous);
+    const target = artistKey(current);
+    if (!source || !target || source === target) continue;
+    const [a, b] = source < target ? [source, target] : [target, source];
+    const key = `${a}\u0000${b}`;
+    const edge = edgeMap.get(key) ?? { source: a, target: b, weight: 0 };
+    edge.weight += 1;
+    edgeMap.set(key, edge);
+  }
+
+  const connections = new Map<string, number>();
+  const edges = [...edgeMap.values()]
+    .filter((edge) => edge.weight >= minimumTransitionWeight)
+    .sort((a, b) => b.weight - a.weight);
+  const visible = new Set(edges.flatMap((edge) => [edge.source, edge.target]));
+  for (const edge of edges) {
+    connections.set(edge.source, (connections.get(edge.source) ?? 0) + edge.weight);
+    connections.set(edge.target, (connections.get(edge.target) ?? 0) + edge.weight);
+  }
+  const nodes = [...totals.values()]
+    .filter((node) => visible.has(node.id))
+    .sort((a, b) => b.minutes - a.minutes || b.plays - a.plays || a.name.localeCompare(b.name));
+  for (const node of nodes) node.connections = connections.get(node.id) ?? 0;
+
+  return { nodes, edges };
+}
+
+function seasonForDay(day: string): { value: MosaicPeriodOption["value"]; label: string; sortKey: string } {
+  const year = Number(day.slice(0, 4));
+  const month = Number(day.slice(5, 7));
+  if (month === 12 || month <= 2) {
+    const startYear = month === 12 ? year : year - 1;
+    return { value: `season:${startYear}:winter`, label: `Winter ${startYear}–${String(startYear + 1).slice(-2)}`, sortKey: `${startYear}-12-01` };
+  }
+  const season = month <= 5 ? "spring" : month <= 8 ? "summer" : "autumn";
+  const startMonth = season === "spring" ? "03" : season === "summer" ? "06" : "09";
+  return { value: `season:${year}:${season}`, label: `${season[0].toUpperCase()}${season.slice(1)} ${year}`, sortKey: `${year}-${startMonth}-01` };
+}
+
+export function mosaicPeriodOptions(plays: EnrichedPlay[]): MosaicPeriodOption[] {
+  const seasons = new Map<string, MosaicPeriodOption>();
+  const months = new Map<string, MosaicPeriodOption>();
+  for (const play of plays) {
+    const season = seasonForDay(play.day);
+    seasons.set(season.value, { ...season, kind: "season" });
+    const month = play.day.slice(0, 7);
+    months.set(`month:${month}`, {
+      value: `month:${month}`,
+      label: new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${month}-01T00:00:00Z`)),
+      kind: "month",
+      sortKey: `${month}-01`,
+    });
+  }
+  const newestFirst = (a: MosaicPeriodOption, b: MosaicPeriodOption) => b.sortKey.localeCompare(a.sortKey);
+  return [...seasons.values()].sort(newestFirst).concat([...months.values()].sort(newestFirst));
+}
+
+function inMosaicPeriod(play: EnrichedPlay, period: MosaicPeriod): boolean {
+  if (period === "all") return true;
+  if (period.startsWith("month:")) return play.day.slice(0, 7) === period.slice(6);
+  return seasonForDay(play.day).value === period;
+}
+
+export function albumMosaic(plays: EnrichedPlay[], period: MosaicPeriod = "all", limit = 48): MosaicAlbum[] {
+  const albums = new Map<string, MosaicAlbum>();
+  for (const play of plays) {
+    if (!inMosaicPeriod(play, period)) continue;
+    const id = play.albumId || `album:${play.albumName}`;
+    const current = albums.get(id) ?? {
+      id,
+      name: play.albumName || "Unknown album",
+      artistName: play.artistName || "Unknown artist",
+      coverUrl: play.coverUrl,
+      plays: 0,
+      minutes: 0,
+    };
+    current.plays += 1;
+    current.minutes += play.minutes;
+    if (!current.coverUrl && play.coverUrl) current.coverUrl = play.coverUrl;
+    albums.set(id, current);
+  }
+  return [...albums.values()]
+    .sort((a, b) => b.minutes - a.minutes || b.plays - a.plays || a.name.localeCompare(b.name))
+    .slice(0, Math.max(1, limit));
 }
 
 export function activity(plays: EnrichedPlay[], today = todayMoscow()): Array<{ day: string; plays: number; level: number }> {

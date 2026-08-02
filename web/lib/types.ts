@@ -65,6 +65,7 @@ export type WorkerEnv = {
   TOKEN_ENCRYPTION_KEY?: string;
   ADMIN_PASSWORD?: string;
   SESSION_SIGNING_KEY?: string;
+  CRON_SECRET?: string;
   PUBLIC_APP_URL?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;

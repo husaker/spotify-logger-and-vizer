@@ -1,6 +1,6 @@
 # Spotify Logger Web
 
-The production application is a React/TypeScript dashboard hosted with OpenAI Sites. Its server entry point uses the Worker runtime for same-origin APIs and a five-minute scheduled collector. One Google Sheet remains authoritative for listening history, metadata caches, deduplication, and application state.
+The production application is a React/TypeScript dashboard hosted with OpenAI Sites. Its server entry point uses the Worker runtime for same-origin APIs, while GitHub Actions calls a protected synchronization endpoint every five minutes. One Google Sheet remains authoritative for listening history, metadata caches, deduplication, and application state.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ The production application is a React/TypeScript dashboard hosted with OpenAI Si
 
 Copy `.dev.vars.example` to `.dev.vars` and fill every value. Never commit `.dev.vars`.
 
-Generate `TOKEN_ENCRYPTION_KEY` as a cryptographically secure 32-byte value encoded with base64url. Use independent, long random values for `SESSION_SIGNING_KEY` and `TELEGRAM_WEBHOOK_SECRET`.
+Generate `TOKEN_ENCRYPTION_KEY` as a cryptographically secure 32-byte value encoded with base64url. Use independent, long random values for `SESSION_SIGNING_KEY`, `CRON_SECRET`, and `TELEGRAM_WEBHOOK_SECRET`.
 
 Set the Spotify redirect URI to the exact deployed callback URL:
 
@@ -31,7 +31,7 @@ Share the listening-data Google Sheet with the service-account email as Editor. 
 
 ## Operations
 
-Keep `SCHEDULED_SYNC_ENABLED=false` until Spotify is connected and a manual sync succeeds. Then set it to `true`; the installed `*/5 * * * *` trigger begins collecting recent plays.
+Keep `SCHEDULED_SYNC_ENABLED=false`; the OpenAI Sites runtime schedule is intentionally unused. Store the same `CRON_SECRET` value as a protected Sites variable and as the GitHub Actions secret `SPOTIFY_LOGGER_CRON_SECRET`. The `Spotify Logger Sync` workflow calls `/api/cron/sync` every five minutes and can also be run manually from the Actions tab.
 
 Spotify authorization is renewed from `/admin`. The reconnect creates a new six-month authorization cycle without changing listening history.
 

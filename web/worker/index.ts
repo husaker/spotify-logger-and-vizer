@@ -8,6 +8,7 @@ import { exchangeSpotifyCode, spotifyAuthorizationUrl, spotifyUserId } from "../
 import { runSync } from "../lib/server/sync";
 import { createTelegramPairing, handleTelegramWebhook, sendTelegram } from "../lib/server/telegram";
 import { createSpotifyOAuthState, verifySpotifyOAuthState } from "../lib/server/oauth-state";
+import { constantTimeEqual } from "../lib/server/encoding";
 import { demoDashboard } from "../lib/demo";
 
 interface ExecutionContext {
@@ -81,6 +82,18 @@ async function requireAdmin(request: Request, env: WorkerEnv): Promise<Response 
   return await isAdmin(request, env) ? null : json({ error: "Unauthorized" }, 401);
 }
 
+function cronAuthorized(request: Request, env: WorkerEnv): boolean {
+  const prefix = "Bearer ";
+  const authorization = request.headers.get("authorization") ?? "";
+  const candidate = authorization.startsWith(prefix) ? authorization.slice(prefix.length) : "";
+  return Boolean(env.CRON_SECRET) && constantTimeEqual(candidate, env.CRON_SECRET ?? "");
+}
+
+function invalidateDashboardCache(origin: string, ctx: ExecutionContext): void {
+  const cache = defaultCache();
+  if (cache) ctx.waitUntil(cache.delete(new Request(`${origin.replace(/\/$/, "")}/__dashboard-cache-v2`)).catch(() => false));
+}
+
 async function publicDashboard(request: Request, env: WorkerEnv): Promise<Response> {
   if (env.DEMO_MODE === "true") return json(demoDashboard(), 200, { "cache-control": "no-store" });
   if (!googleIsConfigured(env)) return json({ error: "Google Sheet connection is not configured yet" }, 503);
@@ -105,6 +118,17 @@ async function api(request: Request, env: WorkerEnv, ctx: ExecutionContext): Pro
   const url = new URL(request.url);
   const { pathname } = url;
   if (pathname === "/api/dashboard" && request.method === "GET") return publicDashboard(request, env);
+
+  if (pathname === "/api/cron/sync" && request.method === "POST") {
+    if (!cronAuthorized(request, env)) return json({ error: "Unauthorized" }, 401);
+    try {
+      const result = await runSync(env);
+      invalidateDashboardCache(env.PUBLIC_APP_URL ?? url.origin, ctx);
+      return json({ ok: true, added: result.added, lastSyncAt: result.lastSyncAt });
+    } catch {
+      return json({ error: "Synchronization failed" }, 503);
+    }
+  }
 
   if (pathname === "/api/admin/login" && request.method === "POST") {
     if (!isSameOrigin(request)) return json({ error: "Invalid request origin" }, 403);
@@ -146,8 +170,7 @@ async function api(request: Request, env: WorkerEnv, ctx: ExecutionContext): Pro
 
     if (pathname === "/api/admin/sync" && request.method === "POST") {
       const result = await runSync(env);
-      const cache = defaultCache();
-      if (cache) ctx.waitUntil(cache.delete(new Request(`${url.origin}/__dashboard-cache-v2`)).catch(() => false));
+      invalidateDashboardCache(url.origin, ctx);
       return json({ message: `Sync complete · ${result.added} new play${result.added === 1 ? "" : "s"}` });
     }
 
