@@ -29,6 +29,9 @@ test("server-renders the finished public dashboard shell", async () => {
   assert.match(dashboardSource, /square-packed treemap/i);
   assert.doesNotMatch(dashboardSource, /mosaic-caption/i);
   assert.match(dashboardSource, /Ctrl\/⌘ \+ scroll to zoom/i);
+  assert.match(dashboardSource, /Strongest links/i);
+  assert.match(dashboardSource, /slice\(0,5\)/i);
+  assert.doesNotMatch(dashboardSource, /<span>—<\/span>/i);
 });
 
 test("server-renders the protected admin surface without exposing secrets", async () => {

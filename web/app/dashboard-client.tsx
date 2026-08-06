@@ -177,6 +177,7 @@ function layoutUniverse(graph: UniverseGraph): UniversePoint[] {
 function ListeningUniverse({ graph }: { graph: UniverseGraph }) {
   const { tooltip, show, hide } = useInstantTooltip();
   const [selectedId, setSelectedId] = useState(graph.nodes[0]?.id ?? "");
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
   const [view, setView] = useState(UNIVERSE_VIEW);
   const [isPanning, setIsPanning] = useState(false);
   const panStart = useRef<{ pointerId: number; clientX: number; clientY: number; view: typeof view } | null>(null);
@@ -186,7 +187,7 @@ function ListeningUniverse({ graph }: { graph: UniverseGraph }) {
   const maxEdge = Math.max(1, ...graph.edges.map((edge) => edge.weight));
   const selectedEdges = graph.edges.filter((edge) => edge.source === selected?.id || edge.target === selected?.id);
   const neighbourIds = new Set(selectedEdges.flatMap((edge) => [edge.source, edge.target]));
-  const strongestNeighbours = selectedEdges.map((edge) => ({ id: edge.source === selected?.id ? edge.target : edge.source, weight: edge.weight })).sort((a, b) => b.weight - a.weight).slice(0, 3);
+  const strongestNeighbours = selectedEdges.map((edge) => ({ id: edge.source === selected?.id ? edge.target : edge.source, weight: edge.weight })).sort((a, b) => b.weight - a.weight).slice(0, 5);
   const zoom = UNIVERSE_WIDTH / view.width;
   const visibleLimit = zoom < 1.35 ? 12 : zoom < 2 ? 32 : zoom < 3 ? 80 : zoom < 4.5 ? 150 : points.length;
   const labelLimit = zoom < 1.35 ? 8 : zoom < 2 ? 18 : zoom < 3 ? 45 : zoom < 4.5 ? 90 : points.length;
@@ -232,6 +233,7 @@ function ListeningUniverse({ graph }: { graph: UniverseGraph }) {
   function focusArtist(id: string) {
     const point = pointMap.get(id);
     setSelectedId(id);
+    setConnectionsOpen(true);
     if (!point) return;
     const width = UNIVERSE_WIDTH / 5;
     const height = UNIVERSE_HEIGHT / 5;
@@ -242,13 +244,20 @@ function ListeningUniverse({ graph }: { graph: UniverseGraph }) {
     <div className="section-heading universe-heading"><div><span className="eyebrow">Listening universe</span><h2>Artists as musical galaxies</h2><p className="universe-rules">No fixed artist cap. Recurring connections come from transitions within 30-minute listening sessions. The most-listened artists appear first; zoom in to reveal the complete universe.</p></div><div className="universe-tools"><label className="universe-picker">Find artist<select value={selected?.id ?? ""} onChange={(event) => focusArtist(event.target.value)}>{points.map((point) => <option value={point.id} key={point.id}>{point.name}</option>)}</select></label><div className="universe-key"><span>{visiblePoints.length} of {points.length} artists visible</span><span><i className="universe-key-portrait" />More listening</span><span><i className="universe-key-line" />More transitions</span></div></div></div>
     <div className={`universe-canvas ${isPanning ? "is-panning" : ""}`}>
       <div className="universe-zoom-controls" aria-label="Galaxy zoom controls"><button type="button" onClick={() => updateZoom(1 / 1.35)} aria-label="Zoom out" disabled={zoom <= 1.001}>−</button><output aria-live="polite">{Math.round(zoom * 100)}%</output><button type="button" onClick={() => updateZoom(1.35)} aria-label="Zoom in" disabled={zoom >= 7.999}>+</button><button className="universe-reset" type="button" onClick={() => setView(UNIVERSE_VIEW)} disabled={zoom <= 1.001}>Reset</button></div>
+      {connectionsOpen && selected && <aside className="universe-connections" aria-live="polite">
+        <header><div><span>Strongest links</span><b>{selected.name}</b></div><button type="button" onClick={() => setConnectionsOpen(false)} aria-label="Close strongest links">×</button></header>
+        {strongestNeighbours.length ? <div className="universe-connection-list">{strongestNeighbours.map((item) => { const artist = pointMap.get(item.id); if (!artist) return null; const initials = artist.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join(""); return <button className="universe-connection" type="button" key={item.id} onClick={() => focusArtist(item.id)} aria-label={`${artist.name}: ${item.weight} transitions with ${selected.name}`}>
+          {artist.coverUrl ? <img src={artist.coverUrl} alt="" /> : <span className="universe-connection-fallback" aria-hidden="true">{initials}</span>}
+          <span className="universe-connection-name">{artist.name}</span><small>{item.weight} {item.weight === 1 ? "transition" : "transitions"}</small>
+        </button>; })}</div> : <p>No repeated links for this artist in the selected period.</p>}
+      </aside>}
       <div className="universe-zoom-hint">Use + / − or Ctrl/⌘ + scroll to zoom · drag to explore</div>
       <svg viewBox={`${view.x} ${view.y} ${view.width} ${view.height}`} role="img" aria-label="Artist portrait network. Portrait size represents listening time and lines connect artists played consecutively." onPointerDown={startPan} onPointerMove={movePan} onPointerUp={stopPan} onPointerCancel={stopPan} onWheel={(event) => { if (!event.ctrlKey && !event.metaKey) return; event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); updateZoom(Math.exp(-event.deltaY * .0015), (event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height); }}>
         <title>Listening universe for the selected date range</title>
         <desc>Every artist with a recurring listening connection is included. Larger portraits represent more minutes listened, and stronger lines represent repeated consecutive transitions no more than 30 minutes apart. Selecting a portrait focuses its closest listening relationships.</desc>
         <defs>{visiblePoints.map((point) => <clipPath id={`universe-portrait-${point.rank}`} key={point.id}><circle r={point.radius} /></clipPath>)}</defs>
         <g className="universe-edges">{graph.edges.map((edge) => { const source = pointMap.get(edge.source); const target = pointMap.get(edge.target); if (!source || !target || !visibleIds.has(source.id) || !visibleIds.has(target.id)) return null; const active = edge.source === selected?.id || edge.target === selected?.id; return <line className={active ? "active" : "muted"} key={`${edge.source}-${edge.target}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} style={{ "--edge-strength": edge.weight / maxEdge } as React.CSSProperties} />; })}</g>
-        <g className="universe-nodes">{visiblePoints.map((point) => { const label = `${point.name}: ${Math.round(point.minutes)} minutes, ${point.plays} plays, ${point.connections} consecutive transitions`; const isSelected = selected?.id === point.id; const related = neighbourIds.has(point.id); const initials = point.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join(""); return <g key={point.id} role="button" tabIndex={0} aria-label={label} className={`universe-node ${isSelected ? "selected" : related ? "related" : "muted"}`} transform={`translate(${point.x} ${point.y})`} onClick={() => setSelectedId(point.id)} onFocus={() => setSelectedId(point.id)} onPointerEnter={(event) => { setSelectedId(point.id); show(event, label); }} onPointerLeave={hide} onPointerCancel={hide} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedId(point.id); } }}>
+        <g className="universe-nodes">{visiblePoints.map((point) => { const label = `${point.name}: ${Math.round(point.minutes)} minutes, ${point.plays} plays, ${point.connections} consecutive transitions`; const isSelected = selected?.id === point.id; const related = neighbourIds.has(point.id); const initials = point.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join(""); return <g key={point.id} role="button" tabIndex={0} aria-label={label} className={`universe-node ${isSelected ? "selected" : related ? "related" : "muted"}`} transform={`translate(${point.x} ${point.y})`} onClick={() => { setSelectedId(point.id); setConnectionsOpen(true); }} onPointerEnter={(event) => show(event, label)} onPointerLeave={hide} onPointerCancel={hide} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedId(point.id); setConnectionsOpen(true); } }}>
           <circle className="universe-halo" r={point.radius + 9} />
           {point.coverUrl ? <image className="universe-photo" href={point.coverUrl} x={-point.radius} y={-point.radius} width={point.radius * 2} height={point.radius * 2} preserveAspectRatio="xMidYMid slice" clipPath={`url(#universe-portrait-${point.rank})`} /> : <><circle className="universe-fallback" r={point.radius} /><text className="universe-initials" y="4">{initials}</text></>}
           <circle className="universe-portrait-ring" r={point.radius} />
@@ -256,7 +265,7 @@ function ListeningUniverse({ graph }: { graph: UniverseGraph }) {
         </g>; })}</g>
       </svg>
     </div>
-    <div className="universe-detail"><span><b>{selected?.name}</b>Selected artist</span><span><b>{Math.round(selected?.minutes ?? 0).toLocaleString()} min</b>{selected?.plays.toLocaleString()} plays</span><span><b>{selected?.connections.toLocaleString()}</b>consecutive transitions</span><small>{strongestNeighbours.length ? `Strongest links: ${strongestNeighbours.map((item) => `${pointMap.get(item.id)?.name ?? "Unknown"} (${item.weight})`).join(" · ")}` : "No consecutive artist links in this period"}</small></div>
+    <div className="universe-detail"><span><b>{selected?.name}</b>Selected artist</span><span><b>{Math.round(selected?.minutes ?? 0).toLocaleString()} min</b>{selected?.plays.toLocaleString()} plays</span><span><b>{selected?.connections.toLocaleString()}</b>consecutive transitions</span></div>
     <InstantTooltip tooltip={tooltip} />
   </section>;
 }
@@ -361,7 +370,7 @@ export default function DashboardClient() {
 
     <section className="range-bar" aria-label="Dashboard date range">
       <div className="preset-list">{presets.map((item) => <button className={preset === item.id ? "active" : ""} key={item.id} onClick={() => { setPreset(item.id); if (item.id === "custom") setCustom(range); }}>{item.label}</button>)}</div>
-      <div className="range-dates"><label>From<input type="date" value={range.from} max={range.to} onChange={(event) => { setPreset("custom"); setCustom({...range, from:event.target.value}); }} /></label><span>—</span><label>To<input type="date" value={range.to} min={range.from} max={todayMoscow()} onChange={(event) => { setPreset("custom"); setCustom({...range, to:event.target.value}); }} /></label></div>
+      <div className="range-dates"><label>From<input type="date" value={range.from} max={range.to} onChange={(event) => { setPreset("custom"); setCustom({...range, from:event.target.value}); }} /></label><label>To<input type="date" value={range.to} min={range.from} max={todayMoscow()} onChange={(event) => { setPreset("custom"); setCustom({...range, to:event.target.value}); }} /></label></div>
     </section>
 
     <section className="metrics-grid">
