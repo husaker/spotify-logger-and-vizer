@@ -31,7 +31,12 @@ test("server-renders the finished public dashboard shell", async () => {
   assert.match(dashboardSource, /Ctrl\/⌘ \+ scroll to zoom/i);
   assert.match(dashboardSource, /Strongest links/i);
   assert.match(dashboardSource, /slice\(0,5\)/i);
+  assert.match(dashboardSource, /github\.com\/husaker\/spotify-logger-and-vizer/i);
   assert.doesNotMatch(dashboardSource, /<span>—<\/span>/i);
+
+  const dashboardStyles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(dashboardStyles, /\.bar-column\s*\{[^}]*flex:\s*1 1 0/i);
+  assert.doesNotMatch(dashboardStyles, /\.bar-chart\s*\{[^}]*overflow-x:\s*auto/i);
 });
 
 test("server-renders the protected admin surface without exposing secrets", async () => {
