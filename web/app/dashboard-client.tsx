@@ -221,19 +221,27 @@ function axisLabel(label: string, monthly: boolean): string {
   return `${day}-${month}-${year.slice(-2)}`;
 }
 
-function axisTickVisible(index: number, length: number, maximumTicks: number): boolean {
-  if (index === 0 || index === length - 1) return true;
-  const stride = Math.max(1, Math.ceil((length - 1) / Math.max(1, maximumTicks - 1)));
-  return index % stride === 0 && index + stride < length;
+function axisTickIndexes(length: number, maximumTicks: number): number[] {
+  if (length <= 0) return [];
+  if (length === 1) return [0];
+  const count = Math.min(length, maximumTicks);
+  return Array.from(new Set(Array.from({ length: count }, (_, index) => Math.round(index * (length - 1) / (count - 1)))));
+}
+
+function ChartAxis({ data, monthly, maximumTicks }: { data: Array<{ label: string }>; monthly: boolean; maximumTicks: number }) {
+  return <div className="chart-axis" aria-hidden="true">
+    {axisTickIndexes(data.length, maximumTicks).map((index) => <small key={`${data[index].label}-${index}`} style={{ left: `${((index + .5) / data.length) * 100}%` }}>{axisLabel(data[index].label, monthly)}</small>)}
+  </div>;
 }
 
 function BarSeries({ data, monthly }: { data: ReturnType<typeof weeklySeries>; monthly: boolean }) {
   const { tooltip, show, hide } = useInstantTooltip();
   const max = Math.max(1, ...data.map((item) => item.value));
   return <div className="bar-chart" role="img" aria-label="Listening plays over time">
-    {data.map((item, index) => { const text = `${item.label}: ${item.value} plays, ${Math.round(item.minutes)} minutes`; return <div className="bar-column" key={item.label} aria-label={text} onPointerEnter={(event) => show(event, text)} onPointerLeave={hide} onPointerCancel={hide}>
-      <i style={{ height: item.value ? `${Math.max(4, (item.value / max) * 100)}%` : 0 }} />{axisTickVisible(index, data.length, 12) && <small>{axisLabel(item.label, monthly)}</small>}
-    </div>; })}
+    <div className="bar-plot">{data.map((item) => { const text = `${item.label}: ${item.value} plays, ${Math.round(item.minutes)} minutes`; return <div className="bar-column" key={item.label} aria-label={text} onPointerEnter={(event) => show(event, text)} onPointerLeave={hide} onPointerCancel={hide}>
+      <i style={{ height: item.value ? `${Math.max(4, (item.value / max) * 100)}%` : 0 }} />
+    </div>; })}</div>
+    <ChartAxis data={data} monthly={monthly} maximumTicks={10} />
     <InstantTooltip tooltip={tooltip} />
   </div>;
 }
@@ -242,10 +250,10 @@ function DiscoveryChart({ data, monthly }: { data: ReturnType<typeof discoverySe
   const { tooltip, show, hide } = useInstantTooltip();
   const max = Math.max(1, ...data.map((item) => item.fresh + item.replay));
   return <div className="bar-chart discovery-chart" role="img" aria-label="New versus replayed tracks over time">
-    {data.map((item, index) => { const text = `${item.label}: ${item.fresh} new, ${item.replay} replayed, ${Math.round(item.score * 100)}% exploration`; return <div className="bar-column" key={item.label} aria-label={text} onPointerEnter={(event) => show(event, text)} onPointerLeave={hide} onPointerCancel={hide}>
+    <div className="bar-plot">{data.map((item) => { const text = `${item.label}: ${item.fresh} new, ${item.replay} replayed, ${Math.round(item.score * 100)}% exploration`; return <div className="bar-column" key={item.label} aria-label={text} onPointerEnter={(event) => show(event, text)} onPointerLeave={hide} onPointerCancel={hide}>
       <div className="stack" style={{ height: item.fresh + item.replay ? `${Math.max(6, ((item.fresh + item.replay) / max) * 100)}%` : 0, minHeight: item.fresh + item.replay ? 6 : 0 }}><i className="fresh" style={{ flex: item.fresh }} /><i className="replay" style={{ flex: item.replay }} /></div>
-      {axisTickVisible(index, data.length, 8) && <small>{axisLabel(item.label, monthly)}</small>}
-    </div>; })}
+    </div>; })}</div>
+    <ChartAxis data={data} monthly={monthly} maximumTicks={7} />
     <InstantTooltip tooltip={tooltip} />
   </div>;
 }
