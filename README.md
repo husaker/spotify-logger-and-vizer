@@ -1,23 +1,26 @@
 # Spotify Logger
 
-Spotify Logger is a public listening dashboard with a protected administration area and a five-minute Spotify collection job. The application is implemented in React and TypeScript and is hosted with OpenAI Sites. Google Sheets remains the source of truth for listening history and application state.
+A Spotify listening-history collector that runs in GitHub Actions and writes to Google Sheets. cron-job.org triggers the workflow through GitHub's API every five minutes. Collection requires neither a VPS nor OpenAI Sites.
 
-The active application lives in [`web/`](web/README.md). The former Streamlit application, Python collector, multi-user registry, and GitHub Actions scheduler were retired after the full-stack migration.
+See [setup and migration instructions](web/CRON_SETUP.md) for repository secrets, the external trigger, local Spotify authorization and safe cutover from the previous hosted collector.
 
 ## Repository layout
 
-- `web/app/` — dashboard and admin interface
-- `web/lib/` — analytics and server integrations
-- `web/worker/` — HTTP API and scheduled synchronization entry point
-- `web/tests/` — analytics, rendering, and security tests
-- `web/.openai/hosting.json` — Sites hosting configuration
+- `.github/workflows/sync.yml` — serialized, externally dispatched collection job
+- `web/scripts/run-sync.mts` — standalone Node collector entrypoint
+- `web/scripts/authorize-spotify.mts` — local OAuth connection and reauthorization
+- `web/lib/server/` — Spotify, Google Sheets, timestamp deduplication and notifications
+- `web/tests/` — collector, analytics and web tests
+- `web/app/`, `web/worker/` — legacy web dashboard/admin, not required by the collector
 
-## Development
+The personal portfolio is maintained in its separate repository. This repository retains the legacy web source; no hosting is required to execute the collector.
 
-```bash
+## Validate locally
+
+```sh
 cd web
-npm install
-npm run dev
+npm ci
+npm run test:logger
 ```
 
-See [`web/README.md`](web/README.md) for required secrets, Spotify callback configuration, Google Sheet requirements, Telegram pairing, validation, and deployment notes.
+`npm test` also builds and checks the legacy web app. The collector itself runs from the Actions workflow to preserve its single-writer concurrency guarantee. The new workflow and secrets must be released/configured before cron-job.org is enabled; local changes alone do not alter the running logger.

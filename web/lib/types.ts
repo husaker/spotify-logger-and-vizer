@@ -57,12 +57,15 @@ export type AdminStatus = {
 };
 
 export type WorkerEnv = {
+  SYNC_ABORT_SIGNAL?: AbortSignal;
+  SYNC_EXECUTION_MODE?: "github-actions";
   ASSETS: { fetch(request: Request): Promise<Response> };
   GOOGLE_SERVICE_ACCOUNT_JSON?: string;
   USER_SHEET_ID?: string;
   SPOTIFY_CLIENT_ID?: string;
   SPOTIFY_CLIENT_SECRET?: string;
   TOKEN_ENCRYPTION_KEY?: string;
+  FERNET_KEY?: string;
   ADMIN_PASSWORD?: string;
   SESSION_SIGNING_KEY?: string;
   CRON_SECRET?: string;

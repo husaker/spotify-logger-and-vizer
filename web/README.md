@@ -1,20 +1,21 @@
 # Spotify Logger Web
 
-The production application is a React/TypeScript dashboard hosted with OpenAI Sites. Its server entry point uses the Worker runtime for same-origin APIs, while GitHub Actions calls a protected synchronization endpoint every five minutes. One Google Sheet remains authoritative for listening history, metadata caches, deduplication, and application state.
+The React/TypeScript web application lives here. Listening history is collected by a standalone Node entrypoint in GitHub Actions; cron-job.org dispatches it every five minutes. Collection uses Spotify and Google Sheets directly, without a hosted HTTP endpoint or D1.
 
 ## Architecture
 
-- `/` is the public, read-only listening dashboard.
-- `/admin` is protected by the dedicated application password.
-- `worker/index.ts` serves the API, Spotify callback, Telegram webhook, and scheduled sync.
-- `lib/server/` contains Google, Spotify, encryption, session, synchronization, and notification code.
+- `scripts/run-sync.mts` is the standalone Actions collector.
+- `scripts/authorize-spotify.mts` provides local Spotify reauthorization with a loopback callback.
+- `lib/server/sync.ts` contains collection logic; `sync-write.ts` filters timestamps and writes explicit Sheet ranges.
+- `/` and `/admin` are the legacy web dashboard and admin surfaces. They are not required for collection.
+- `worker/index.ts` retains the legacy web APIs; collection in this source requires the Actions execution mode.
 - No D1 or R2 database is used.
 
 ## Local configuration
 
 Copy `.dev.vars.example` to `.dev.vars` and fill every value. Never commit `.dev.vars`.
 
-Generate `TOKEN_ENCRYPTION_KEY` as a cryptographically secure 32-byte value encoded with base64url. Use independent, long random values for `SESSION_SIGNING_KEY`, `CRON_SECRET`, and `TELEGRAM_WEBHOOK_SECRET`.
+The Actions collector can reuse the existing `FERNET_KEY` and `refresh_token_enc` authorization. The legacy web admin uses `TOKEN_ENCRYPTION_KEY`, a cryptographically secure 32-byte value encoded with base64url. Use independent, long random values for `SESSION_SIGNING_KEY`, `CRON_SECRET`, and `TELEGRAM_WEBHOOK_SECRET`.
 
 Set the Spotify redirect URI to the exact deployed callback URL:
 
@@ -31,9 +32,11 @@ Share the listening-data Google Sheet with the service-account email as Editor. 
 
 ## Operations
 
-Keep `SCHEDULED_SYNC_ENABLED=false`; the OpenAI Sites runtime schedule is intentionally unused. Store the same `CRON_SECRET` value as a protected Sites variable and as the GitHub Actions secret `SPOTIFY_LOGGER_CRON_SECRET`. The `Spotify Logger Sync` workflow calls `/api/cron/sync` every five minutes and can also be run manually from the Actions tab.
+Follow [CRON_SETUP.md](./CRON_SETUP.md) for GitHub secrets, external dispatch, local Spotify authorization and safe cutover. Keep the legacy hosted `SCHEDULED_SYNC_ENABLED=false` and disable other writers before switching. A local code update does not change an already deployed Worker.
 
-Spotify authorization is renewed from `/admin`. The reconnect creates a new six-month authorization cycle without changing listening history.
+The workflow concurrency group serializes all runs. Each run deduplicates against the complete log by timestamp, preserves exact new timestamps and valid repeats, and writes an explicit range. A failed/ambiguous write is not blindly retried: the next run rereads the Sheet. Historical rows are not deleted. This requires the workflow to be the only writer; there is no distributed lock across other applications.
+
+Token rotation is saved before later data/cache processing. Refresh credentials remain encrypted in `__app_state`. Reauthorize locally when required; no publicly hosted callback is necessary.
 
 ## Telegram pairing
 

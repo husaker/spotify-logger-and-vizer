@@ -1,18 +1,9 @@
 import type { AppState, WorkerEnv } from "../types";
-import { decryptToken, encryptToken } from "./crypto";
-import { appendRows, batchWrite, readAppState, readRanges, writeAppState } from "./google";
+import { storedRefreshToken } from "./sync-token";
+import { appendRows, batchWrite, ensureLogRows, readAppState, readRanges, writeAppState } from "./google";
 import { notificationChanges, notifyExpired, notifyFailure, notifyRecovery } from "./notifications";
 import { recentlyPlayed, refreshSpotifyToken, spotifyArtist, SpotifyInvalidGrantError, type SpotifyTrack } from "./spotify";
-
-const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-
-function moscowDisplay(iso: string): string {
-  const date = new Date(iso);
-  const shifted = new Date(date.getTime() + 3 * 60 * 60 * 1000);
-  const hour = shifted.getUTCHours();
-  const clock = `${hour % 12 || 12}:${String(shifted.getUTCMinutes()).padStart(2, "0")}${hour >= 12 ? "PM" : "AM"}`;
-  return `${MONTHS[shifted.getUTCMonth()]} ${shifted.getUTCDate()}, ${shifted.getUTCFullYear()} at ${clock}`;
-}
+import { persistUniqueLogRows } from "./sync-write";
 
 async function upsertRows(env: WorkerEnv, range: string, rows: Array<Array<string | number>>, existingRows: string[][]): Promise<void> {
   const positions = new Map<string, number>();
@@ -44,61 +35,57 @@ function albumCacheRow(track: SpotifyTrack, now: string): string[] | null {
 }
 
 export async function runSync(env: WorkerEnv): Promise<{ added: number; lastSyncAt: string }> {
-  if (!env.TOKEN_ENCRYPTION_KEY) throw new Error("TOKEN_ENCRYPTION_KEY is not configured");
+  if (env.SYNC_EXECUTION_MODE !== "github-actions") throw new Error("Synchronization runs only in the serialized GitHub Actions workflow");
+  return runSerializedSync({ ...env, SYNC_ABORT_SIGNAL: env.SYNC_ABORT_SIGNAL ?? AbortSignal.timeout(120_000) });
+}
+
+async function runSerializedSync(env: WorkerEnv): Promise<{ added: number; lastSyncAt: string }> {
   let state = await readAppState(env);
-  const encrypted = state.refresh_token_enc_v2;
-  if (!encrypted) {
-    await writeAppState(env, { reauth_required: "true", last_error: "Spotify reconnect required" });
-    throw new SpotifyInvalidGrantError("Spotify reconnect required");
-  }
   try {
-    const refreshToken = await decryptToken(encrypted, env.TOKEN_ENCRYPTION_KEY);
-    const tokens = await refreshSpotifyToken(env, refreshToken);
+    const stored = await storedRefreshToken(env, state);
+    const tokens = await refreshSpotifyToken(env, stored.value);
+    // Persist rotation immediately, in the same format that was decrypted.
+    if (tokens.refreshToken) await writeAppState(env, await stored.save(tokens.refreshToken));
     const now = new Date().toISOString();
     const lastCursor = Number(state.last_synced_after_ts) || 0;
     const after = lastCursor ? Math.max(0, lastCursor - 120 * 60 * 1000) : Date.now() - 120 * 60 * 1000;
-    const items = await recentlyPlayed(tokens.accessToken, after);
-    const ranges = await readRanges(env, ["__dedupe!A2:A", "__cache_tracks!A2:I", "__cache_artists!A2:F", "__cache_albums!A2:E"]);
-    const dedupe = new Set(ranges["__dedupe!A2:A"].slice(-5000).map((row) => row[0]).filter(Boolean));
+    const items = await recentlyPlayed(tokens.accessToken, after, env.SYNC_ABORT_SIGNAL);
+    const ranges = await readRanges(env, ["log!A2:E", "__cache_tracks!A2:I", "__cache_artists!A2:F", "__cache_albums!A2:E"]);
     const logRows: string[][] = [];
-    const dedupeRows: string[][] = [];
     const trackRows = new Map<string, Array<string | number>>();
     const albumRows = new Map<string, string[]>();
     const artistIds = new Set<string>();
     let cursor = lastCursor;
-    for (const item of items) {
+    for (const item of items.sort((a, b) => Date.parse(a.played_at ?? "") - Date.parse(b.played_at ?? ""))) {
       const track = item.track;
       if (!item.played_at || !track?.id) continue;
-      const key = `${item.played_at}|${track.id}`;
       const playedMs = Date.parse(item.played_at);
-      if (Number.isFinite(playedMs)) cursor = Math.max(cursor, playedMs);
+      if (!Number.isFinite(playedMs)) continue;
+      cursor = Math.max(cursor, playedMs);
       const trackRow = trackCacheRow(track, now);
       const albumRow = albumCacheRow(track, now);
       if (trackRow) trackRows.set(track.id, trackRow);
       if (albumRow) albumRows.set(albumRow[0], albumRow);
       for (const artist of track.artists ?? []) if (artist.id) artistIds.add(artist.id);
-      if (dedupe.has(key)) continue;
-      logRows.push([moscowDisplay(item.played_at), track.name ?? "", track.artists?.[0]?.name ?? "", track.id, track.external_urls?.spotify ?? `https://open.spotify.com/track/${track.id}`]);
-      dedupeRows.push([key]);
-      dedupe.add(key);
+      logRows.push([new Date(playedMs).toISOString(), track.name ?? "", track.artists?.[0]?.name ?? "", track.id, track.external_urls?.spotify ?? `https://open.spotify.com/track/${track.id}`]);
     }
-    await appendRows(env, "log!A:E", logRows);
-    await appendRows(env, "__dedupe!A:A", dedupeRows);
+    const added = await persistUniqueLogRows(ranges["log!A2:E"], logRows, {
+      ensureRows: lastRow => ensureLogRows(env, lastRow),
+      write: updates => batchWrite(env, updates),
+    });
     await upsertRows(env, "__cache_tracks", [...trackRows.values()], ranges["__cache_tracks!A2:I"]);
     await upsertRows(env, "__cache_albums", [...albumRows.values()], ranges["__cache_albums!A2:E"]);
     const knownArtists = new Set(ranges["__cache_artists!A2:F"].map((row) => row[0]).filter(Boolean));
     const artistRows: string[][] = [];
     for (const artistId of [...artistIds].filter((id) => !knownArtists.has(id)).slice(0, 25)) {
-      const artist = await spotifyArtist(tokens.accessToken, artistId);
+      const artist = await spotifyArtist(tokens.accessToken, artistId, env.SYNC_ABORT_SIGNAL);
       const genres = artist.genres ?? [];
       artistRows.push([artistId, artist.name ?? "", artist.images?.[0]?.url ?? "", genres.join("; "), genres[0] ?? "", now]);
     }
     await upsertRows(env, "__cache_artists", artistRows, ranges["__cache_artists!A2:F"]);
     const recovery = await notifyRecovery(env, state).catch(() => ({}));
-    const tokenChange: AppState = tokens.refreshToken ? { refresh_token_enc_v2: await encryptToken(tokens.refreshToken, env.TOKEN_ENCRYPTION_KEY) } : {};
     const reminder = await notificationChanges(env, state).catch(() => ({}));
     const changes: AppState = {
-      ...tokenChange,
       ...recovery,
       ...reminder,
       last_synced_after_ts: String(cursor),
@@ -108,15 +95,15 @@ export async function runSync(env: WorkerEnv): Promise<{ added: number; lastSync
       reauth_required: "false",
     };
     await writeAppState(env, changes);
-    return { added: logRows.length, lastSyncAt: now };
+    return { added, lastSyncAt: now };
   } catch (error) {
     state = await readAppState(env).catch(() => state);
     const failures = (Number(state.consecutive_failures) || 0) + 1;
     const expired = error instanceof SpotifyInvalidGrantError;
-    const notification = expired
+    const notification = env.SYNC_ABORT_SIGNAL?.aborted ? {} : expired
       ? await notifyExpired(env, state).catch(() => ({}))
       : await notifyFailure(env, state, failures).catch(() => ({}));
-    await writeAppState(env, {
+    await writeAppState({ ...env, SYNC_ABORT_SIGNAL: AbortSignal.timeout(1500) }, {
       ...notification,
       consecutive_failures: String(failures),
       last_error: expired ? "Spotify reauthorization required" : error instanceof Error ? error.message.slice(0, 240) : "Synchronization failed",
@@ -124,4 +111,15 @@ export async function runSync(env: WorkerEnv): Promise<{ added: number; lastSync
     }).catch(() => undefined);
     throw error;
   }
+}
+
+// Can run before cutover: verifies the existing connection without collecting log rows
+// or advancing the cursor. Only a rotated credential, if returned, is saved.
+export async function checkSpotifyConnection(env: WorkerEnv): Promise<void> {
+  const bounded = { ...env, SYNC_ABORT_SIGNAL: AbortSignal.timeout(45_000) };
+  const state = await readAppState(bounded);
+  const stored = await storedRefreshToken(bounded, state);
+  const tokens = await refreshSpotifyToken(bounded, stored.value);
+  if (tokens.refreshToken) await writeAppState(bounded, await stored.save(tokens.refreshToken));
+  await recentlyPlayed(tokens.accessToken, Date.now() - 120 * 60_000, bounded.SYNC_ABORT_SIGNAL);
 }

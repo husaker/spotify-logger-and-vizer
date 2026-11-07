@@ -22,13 +22,20 @@ function spotifyConfig(env: WorkerEnv): { id: string; secret: string } {
 
 async function retryingFetch(input: string, init: RequestInit, attempts = 4): Promise<Response> {
   let last: Response | null = null;
+  init.signal?.throwIfAborted();
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const response = await fetch(input, init);
     last = response;
     if (response.status !== 429 && response.status < 500) return response;
-    const retryAfter = Number(response.headers.get("retry-after"));
-    const delay = Number.isFinite(retryAfter) ? retryAfter * 1000 : Math.min(8_000, 500 * (2 ** attempt));
-    await new Promise((resolve) => setTimeout(resolve, delay));
+    const retryHeader = response.headers.get("retry-after");
+    const retryAfter = retryHeader === null ? NaN : Number(retryHeader);
+    const delay = Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter * 1000 : Math.min(8_000, 500 * (2 ** attempt));
+    if (attempt + 1 < attempts) await new Promise<void>((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(init.signal?.reason); };
+      const timer = setTimeout(() => { init.signal?.removeEventListener("abort", abort); resolve(); }, delay);
+      init.signal?.addEventListener("abort", abort, { once: true });
+      if (init.signal?.aborted) abort();
+    });
   }
   return last!;
 }
@@ -56,6 +63,7 @@ async function tokenRequest(env: WorkerEnv, body: URLSearchParams): Promise<Reco
       "content-type": "application/x-www-form-urlencoded",
     },
     body,
+    signal: env.SYNC_ABORT_SIGNAL,
   });
   const result = await response.json() as Record<string, unknown>;
   if (!response.ok) {
@@ -81,8 +89,8 @@ export async function refreshSpotifyToken(env: WorkerEnv, refreshToken: string):
   return { accessToken: String(result.access_token), refreshToken: result.refresh_token ? String(result.refresh_token) : undefined };
 }
 
-async function spotifyGet<T>(url: string, accessToken: string): Promise<T> {
-  const response = await retryingFetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
+async function spotifyGet<T>(url: string, accessToken: string, signal?: AbortSignal): Promise<T> {
+  const response = await retryingFetch(url, { headers: { authorization: `Bearer ${accessToken}` }, signal });
   if (!response.ok) throw new Error(`Spotify API request failed (${response.status})`);
   return response.json() as Promise<T>;
 }
@@ -92,17 +100,17 @@ export async function spotifyUserId(accessToken: string): Promise<string> {
   return result.id;
 }
 
-export async function recentlyPlayed(accessToken: string, afterMs: number): Promise<RecentlyPlayedItem[]> {
+export async function recentlyPlayed(accessToken: string, afterMs: number, signal?: AbortSignal): Promise<RecentlyPlayedItem[]> {
   let url: string | null = `https://api.spotify.com/v1/me/player/recently-played?${new URLSearchParams({ limit: "50", after: String(Math.max(0, afterMs)) })}`;
   const items: RecentlyPlayedItem[] = [];
   for (let page = 0; url && page < 5; page += 1) {
-    const result: { items?: RecentlyPlayedItem[]; next?: string | null } = await spotifyGet(url, accessToken);
+    const result: { items?: RecentlyPlayedItem[]; next?: string | null } = await spotifyGet(url, accessToken, signal);
     items.push(...(result.items ?? []));
     url = result.next ?? null;
   }
   return items;
 }
 
-export async function spotifyArtist(accessToken: string, artistId: string): Promise<SpotifyArtist> {
-  return spotifyGet<SpotifyArtist>(`https://api.spotify.com/v1/artists/${encodeURIComponent(artistId)}`, accessToken);
+export async function spotifyArtist(accessToken: string, artistId: string, signal?: AbortSignal): Promise<SpotifyArtist> {
+  return spotifyGet<SpotifyArtist>(`https://api.spotify.com/v1/artists/${encodeURIComponent(artistId)}`, accessToken, signal);
 }

@@ -45,6 +45,7 @@ async function googleAccessToken(env: WorkerEnv): Promise<string> {
   const response = await fetch(account.token_uri ?? "https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
+    signal: env.SYNC_ABORT_SIGNAL,
     body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }),
   });
   if (!response.ok) throw new Error(`Google authentication failed (${response.status})`);
@@ -56,6 +57,7 @@ async function googleAccessToken(env: WorkerEnv): Promise<string> {
 async function sheetsFetch(env: WorkerEnv, path: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(`https://sheets.googleapis.com/v4/${path}`, {
     ...init,
+    signal: env.SYNC_ABORT_SIGNAL,
     headers: {
       authorization: `Bearer ${await googleAccessToken(env)}`,
       "content-type": "application/json",
@@ -88,6 +90,20 @@ export async function appendRows(env: WorkerEnv, range: string, values: Array<Ar
   await sheetsFetch(env, `spreadsheets/${sheetId}/values/${encodeURIComponent(range)}:append?${params}`, {
     method: "POST",
     body: JSON.stringify({ majorDimension: "ROWS", values }),
+  });
+}
+
+export async function ensureLogRows(env: WorkerEnv, lastRow: number): Promise<void> {
+  const { sheetId } = requireGoogleConfig(env);
+  const response = await sheetsFetch(env, `spreadsheets/${sheetId}?fields=sheets.properties`);
+  const data = await response.json() as { sheets?: Array<{ properties: { sheetId: number; title: string; gridProperties?: { rowCount?: number } } }> };
+  const log = data.sheets?.find(sheet => sheet.properties.title === "log")?.properties;
+  const rowCount = log?.gridProperties?.rowCount;
+  if (!log || !rowCount) throw new Error("Listening log worksheet is unavailable");
+  if (lastRow <= rowCount) return;
+  await sheetsFetch(env, `spreadsheets/${sheetId}:batchUpdate`, {
+    method: "POST",
+    body: JSON.stringify({ requests: [{ appendDimension: { sheetId: log.sheetId, dimension: "ROWS", length: Math.max(1000, lastRow - rowCount) } }] }),
   });
 }
 
