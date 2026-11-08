@@ -171,3 +171,17 @@ If Spotify rejects a stored token as expired/revoked, repeat this local authoriz
 The previous Sites application is no longer part of this flow. Its Google service-account binding and target workbook have been replaced with nonfunctional values, and its scheduled sync is disabled. Do not restore those settings or use its old admin/sync endpoints. The old deployed version and source remain in hosting/Git history for recovery; the active repository contains only this standalone collector. Shared Google credentials used by Actions and the personal portfolio were not revoked.
 
 References: [GitHub workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event), [Actions notifications](https://docs.github.com/en/subscriptions-and-notifications/how-tos/managing-github-actions-notifications), [Spotify redirect URIs](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri), [cron-job.org FAQ](https://cron-job.org/en/faq/).
+
+## Python migration validation
+
+The Python candidate lives in `spotify_logger/`, with pinned dependencies in `requirements.txt`. During validation, the default workflow implementation is still **TypeScript**; the existing cron jobs continue using it. Both implementations share `spotify-logger-sync`, so their writes never overlap in this repository.
+
+```sh
+python3.12 -m venv .venv-python
+.venv-python/bin/python -m pip install -r requirements.txt
+.venv-python/bin/python -m unittest discover -s tests_py -v
+```
+
+Manually dispatch with `implementation=python` and `dry_run=true` to validate the real Spotify response, timestamp filtering and artist enrichment. Shadow mode cannot write listening rows, cache values or success/cursor state. It may save an OAuth refresh-token rotation in the existing encryption format to keep authorization usable. `implementation=python, health_only=true` runs the same read-only freshness probe as the current collector. Ordinary cron requests omit `implementation` and remain on TypeScript until validation and cutover are complete.
+
+Python local reauthorization is available as `.venv-python/bin/python -m spotify_logger authorize --env-file .env`. It uses the same `.env` keys, loopback callback and encrypted Sheet state. New workbook initialization is still manual as described above.
