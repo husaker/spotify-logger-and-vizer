@@ -24,7 +24,7 @@ Use the existing `FERNET_KEY` when available; no Sites encryption-key transfer i
 
 Existing Fernet or v2 authorization in the Sheet remains usable with its corresponding encryption key. For a new connection or later reauthorization:
 
-1. Add `http://127.0.0.1:8888/callback` to the Spotify application's allowed Redirect URIs.
+1. Use an existing registered HTTP loopback callback ending in `/callback` via `SPOTIFY_REDIRECT_URI`, or add the default `http://127.0.0.1:8888/callback` to the Spotify application's allowed Redirect URIs.
 2. Put the four connection values and either `FERNET_KEY` or `TOKEN_ENCRYPTION_KEY` in an ignored local `web/.env.logger.local` file (never commit it). Use the same chosen encryption key as GitHub.
 3. Pause dispatches and wait for the active workflow to finish, so token/state edits do not overlap collection.
 4. From `web`, run `node --env-file=.env.logger.local --import tsx scripts/authorize-spotify.mts` and open the printed authorization URL.

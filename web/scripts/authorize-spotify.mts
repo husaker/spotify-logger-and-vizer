@@ -16,14 +16,19 @@ if (process.env.GITHUB_ACTIONS === "true" || required.some(key => !process.env[k
     ...Object.fromEntries(required.map(key => [key, process.env[key]])),
     TOKEN_ENCRYPTION_KEY: process.env.TOKEN_ENCRYPTION_KEY,
     FERNET_KEY: process.env.FERNET_KEY,
-    SYNC_ABORT_SIGNAL: AbortSignal.timeout(5 * 60_000),
+    SYNC_ABORT_SIGNAL: AbortSignal.timeout(30 * 60_000),
   } as WorkerEnv;
   // Validate encryption before asking Spotify for a token.
   const field = env.TOKEN_ENCRYPTION_KEY ? "refresh_token_enc_v2" : "refresh_token_enc";
   const encrypt = (value: string) => env.TOKEN_ENCRYPTION_KEY ? encryptToken(value, env.TOKEN_ENCRYPTION_KEY) : encryptFernet(value, env.FERNET_KEY!);
   await encrypt("validate-key");
   const state = randomBytes(32).toString("hex");
-  const redirect = "http://127.0.0.1:8888/callback";
+  const redirect = process.env.SPOTIFY_REDIRECT_URI || "http://127.0.0.1:8888/callback";
+  const callback = new URL(redirect);
+  if (callback.protocol !== "http:" || callback.hostname !== "127.0.0.1" || callback.pathname !== "/callback" || callback.search || callback.hash || callback.username || callback.password) {
+    throw new Error("SPOTIFY_REDIRECT_URI must be an HTTP 127.0.0.1 loopback URL ending in /callback");
+  }
+  const port = Number(callback.port || 80);
   let handling = false;
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", redirect);
@@ -58,9 +63,9 @@ if (process.env.GITHUB_ACTIONS === "true" || required.some(key => !process.env[k
       process.exitCode = 1;
     } finally { clearTimeout(timer); server.close(); }
   });
-  const timer = setTimeout(() => { console.error("Authorization timed out."); process.exitCode = 1; server.close(); }, 5 * 60_000);
-  server.once("error", () => { clearTimeout(timer); console.error("Could not bind 127.0.0.1:8888. Close the process using that port and retry."); process.exitCode = 1; });
-  server.listen(8888, "127.0.0.1", () => {
+  const timer = setTimeout(() => { console.error("Authorization timed out."); process.exitCode = 1; server.close(); }, 30 * 60_000);
+  server.once("error", () => { clearTimeout(timer); console.error("Could not bind the configured loopback port. Close the process using that port and retry."); process.exitCode = 1; });
+  server.listen(port, "127.0.0.1", () => {
     const params = new URLSearchParams({ response_type: "code", client_id: env.SPOTIFY_CLIENT_ID!, redirect_uri: redirect, scope: "user-read-recently-played user-read-private", state });
     console.log(`Open in your browser:\nhttps://accounts.spotify.com/authorize?${params}`);
   });
