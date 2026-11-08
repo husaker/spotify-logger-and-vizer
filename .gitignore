@@ -8,18 +8,15 @@ secrets/
 .venv/
 .idea/
 
-# Python artifacts left by the retired implementation
+# Python artifacts
 __pycache__/
 *.py[cod]
 
 # Operating-system metadata
 .DS_Store
 
-# Node dependencies and local tooling
+# Leftover local dependencies from the retired collector
 node_modules/
-*.tsbuildinfo
-coverage/
-npm-debug.log*
 
 # Isolated Python collector environment
 .venv-python/
