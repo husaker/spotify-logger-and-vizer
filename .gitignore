@@ -1,6 +1,7 @@
 # Local secrets and credentials
 .env
 .env.*
+!.env.example
 secrets/
 
 # Local development environments
@@ -13,3 +14,9 @@ __pycache__/
 
 # Operating-system metadata
 .DS_Store
+
+# Node dependencies and local tooling
+node_modules/
+*.tsbuildinfo
+coverage/
+npm-debug.log*
