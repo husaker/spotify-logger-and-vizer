@@ -5,10 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       implementation:
-        description: Collector implementation (TypeScript remains active during validation)
+        description: Collector implementation (TypeScript is retained for rollback)
         type: choice
-        options: [typescript, python]
-        default: typescript
+        options: [python, typescript]
+        default: python
       dry_run:
         description: Python shadow validation without log, cache or cursor writes
         type: boolean

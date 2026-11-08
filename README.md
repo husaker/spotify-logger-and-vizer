@@ -1,6 +1,6 @@
 # Spotify Logger
 
-A single-user Spotify listening-history collector. It runs in GitHub Actions, stores events and metadata in Google Sheets, and is triggered externally by cron-job.org. No public website or VPS is required. The personal portfolio/dashboard is maintained in a separate repository.
+A single-user Spotify listening-history collector written in Python 3.12+. It runs in GitHub Actions, stores events and metadata in Google Sheets, and is triggered externally by cron-job.org. No public website or VPS is required. The personal portfolio/dashboard is maintained in a separate repository.
 
 ```mermaid
 flowchart LR
@@ -18,19 +18,19 @@ flowchart LR
 Cloning the code alone does not start collection: you need your own GitHub repository, Google workbook/service account, Spotify application and cron-job.org account. No credentials or listening data are distributed with this repository.
 
 1. **Create your repository.** Fork this repository on GitHub, or push a clone into a new repository you own. Enable GitHub Actions in your copy if GitHub asks. Keep the workflow name `Spotify Logger Sync` and its concurrency group unchanged. The instructions below assume the default branch is `main`; otherwise use your actual default branch in every dispatch body.
-2. **Install and validate.** Install Node.js 24+, clone your copy locally, then run `npm ci` and `npm run verify` from its root.
+2. **Install and validate.** Install Python 3.12+, clone your copy locally, then create a virtual environment and run the install/test commands in [Local development](#local-development-and-spotify-reauthorization).
 3. **Prepare Google access.** In a Google Cloud project, enable the Google Sheets API, create a service account and download its JSON key. Keep it in ignored `secrets/service_account.json`. Create a new Google workbook and share it with that JSON file's `client_email` as **Editor**. Copy the workbook ID from `/spreadsheets/d/<WORKBOOK_ID>/edit`.
 4. **Initialize the workbook.** Create all five worksheets listed in [Google Sheets schema](#google-sheets-schema), with exactly those names. Put the listed column headers in row 1, one header per cell, starting in column A. Leave data rows empty. In particular, `__app_state` initially needs only the `key` and `value` headers. The collector does not create these worksheets automatically.
 5. **Prepare Spotify.** Create your own application in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), register `http://127.0.0.1:8766/callback` (or another free loopback port), and copy its client ID and secret. Follow the app's user-allowlist requirements. Spotify currently requires the owner of a Development Mode app to have active Premium; see [quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) for current account/API restrictions.
 6. **Generate your own encryption key.** For a new installation, generate a Fernet-compatible 32-byte key with the command below. Copy `.env.example` to `.env`, fill your own values, and put that key in `FERNET_KEY`. Use the same key later in GitHub Secrets. Never reuse this repository owner's key or commit your populated `.env`.
-7. **Connect Spotify locally.** Run `npm run authorize` and approve access using the printed URL. The callback writes the first encrypted refresh token to your workbook. You do not need to copy a refresh token manually or obtain an old Sites token. Leave external cron tasks disabled until the connection is verified.
+7. **Connect Spotify locally.** Run `.venv-python/bin/python -m spotify_logger authorize --env-file .env` and approve access using the printed URL. The callback writes the first encrypted refresh token to your workbook. You do not need to copy a refresh token manually or obtain an old Sites token. Leave external cron tasks disabled until the connection is verified.
 8. **Configure Actions.** Add the required [repository secrets](#github-configuration) to your own repository. Run `Spotify Logger Sync` manually with `check_only=true`, then run it normally. Check that both runs succeed; the normal run should update `__app_state.last_sync_at`. A successful run may add zero listening events.
 9. **Enable the two cron tasks.** Follow [cron-job.org tasks](#cron-joborg-tasks), replacing the URL owner/repository with your copy. Create the dispatch token for your own repository, enable email alerts, and enable the health task only after the first successful collection. A clone's remote URL does not automatically change the cron URL, secrets or cloud settings.
 
 Generate a new encryption key locally (prints the key once so you can save it):
 
 ```sh
-node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url') + '=')"
+.venv-python/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
 For example, `.env` and GitHub must refer to **your** workbook and Spotify application. Your local Google JSON file becomes the complete `GOOGLE_SERVICE_ACCOUNT_JSON` GitHub secret. The single-user collector does not use the old registry workbook or require the personal portfolio repository.
@@ -53,16 +53,18 @@ Historical duplicates are not deleted. Deduplication assumes this workflow is th
 
 ```text
 .github/workflows/sync.yml    Externally dispatched collector and health workflow
-src/sync.ts                  Collection and metadata enrichment
-src/sync-write.ts            Full-log timestamp filtering and explicit-range writes
-src/sync-token.ts             Fernet/v2 credential selection and rotation
-src/google.ts                Google Sheets access and app-state updates
-src/spotify.ts               Spotify token refresh, recent history and artist metadata
-src/sync-health.ts           Read-only freshness probe
-src/crypto.ts, fernet.ts     Stored-token encryption compatibility
-scripts/run-sync.mts         GitHub Actions entrypoint
-scripts/authorize-spotify.mts Local Spotify OAuth callback
-tests/                      Collector, crypto, date and recovery tests
+spotify_logger/sync.py       Collection, enrichment, deduplication and recovery
+spotify_logger/google.py     Google Sheets and app-state updates
+spotify_logger/spotify.py    Spotify token refresh, history and artist metadata
+spotify_logger/timestamps.py Exact timestamp parsing and legacy minute filtering
+spotify_logger/tokens.py     Compatible Fernet/v2 credential encryption and rotation
+spotify_logger/health.py     Read-only freshness probe
+spotify_logger/authorize.py  Local Spotify OAuth callback
+spotify_logger/__main__.py   CLI entrypoint
+requirements.txt             Locked Python dependencies
+requirements.in              Direct dependency pins
+tests_py/                    Python collector, crypto, health and recovery tests
+src/, scripts/, tests/       Previous TypeScript collector, retained for rollback
 ```
 
 ## GitHub configuration
@@ -139,21 +141,22 @@ Manual workflow options:
 
 ## Local development and Spotify reauthorization
 
-Use Node.js 24 or newer:
+Use Python 3.12 or newer:
 
 ```sh
-npm ci
-npm run verify
+python3.12 -m venv .venv-python
+.venv-python/bin/python -m pip install -r requirements.txt
+.venv-python/bin/python -m unittest discover -s tests_py -v
 ```
 
-`verify` runs TypeScript checking and collector tests. There is no frontend build or local web dashboard in this repository. Ordinary collection is restricted to the named GitHub workflow to preserve the single-writer guarantee.
+The tests cover enrichment, timestamp deduplication, write recovery, token rotation, shadow mode and health checks. Runtime dependencies are `requests` and `cryptography`; the test runner is Python's standard `unittest`. There is no frontend build or local web dashboard in this repository. Ordinary collection is restricted to the named GitHub workflow to preserve the single-writer guarantee.
 
 For initial Spotify connection or later reauthorization:
 
 1. Copy `.env.example` to ignored `.env`, fill the workbook ID, Spotify credentials and the same encryption key as GitHub. Set `GOOGLE_SERVICE_ACCOUNT_FILE` to a local service-account JSON file; inline `GOOGLE_SERVICE_ACCOUNT_JSON` is also accepted and takes priority.
 2. In the Spotify application's settings, register the exact callback URL, for example `http://127.0.0.1:8766/callback`. Choose a free port. `SPOTIFY_REDIRECT_URI` must use HTTP, the explicit loopback IP `127.0.0.1` and the `/callback` path. Its default is port 8888.
 3. Temporarily pause both external tasks and wait for the active collection to finish before changing authorization.
-4. Run `npm run authorize`, open the printed Spotify URL and approve access. The local callback waits up to 30 minutes and saves the refresh token directly to the Sheet in encrypted form. No refresh token is printed and listening history is preserved.
+4. Run `.venv-python/bin/python -m spotify_logger authorize --env-file .env`, open the printed Spotify URL and approve access. The local callback waits up to 30 minutes and saves the refresh token directly to the Sheet in encrypted form. No refresh token is printed and listening history is preserved.
 5. Verify with a manual `check_only=true` workflow run, then resume both cron-job.org tasks.
 
 If Spotify rejects a stored token as expired/revoked, repeat this local authorization flow. No publicly hosted callback is required.
@@ -172,16 +175,15 @@ The previous Sites application is no longer part of this flow. Its Google servic
 
 References: [GitHub workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event), [Actions notifications](https://docs.github.com/en/subscriptions-and-notifications/how-tos/managing-github-actions-notifications), [Spotify redirect URIs](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri), [cron-job.org FAQ](https://cron-job.org/en/faq/).
 
-## Python migration validation
+## Validation and rollback
 
-The Python candidate lives in `spotify_logger/`, with pinned dependencies in `requirements.txt`. During validation, the default workflow implementation is still **TypeScript**; the existing cron jobs continue using it. Both implementations share `spotify-logger-sync`, so their writes never overlap in this repository.
+Python is the default workflow implementation. Existing cron-job.org URLs, bodies, GitHub Secrets and Sheet schemas remain unchanged. The previous TypeScript implementation is retained as a temporary rollback option, with no separate schedule. All runs share `spotify-logger-sync`, so collection writes never overlap in this repository.
 
-```sh
-python3.12 -m venv .venv-python
-.venv-python/bin/python -m pip install -r requirements.txt
-.venv-python/bin/python -m unittest discover -s tests_py -v
-```
+Manual workflow options:
 
-Manually dispatch with `implementation=python` and `dry_run=true` to validate the real Spotify response, timestamp filtering and artist enrichment. Shadow mode cannot write listening rows, cache values or success/cursor state. It may save an OAuth refresh-token rotation in the existing encryption format to keep authorization usable. `implementation=python, health_only=true` runs the same read-only freshness probe as the current collector. Ordinary cron requests omit `implementation` and remain on TypeScript until validation and cutover are complete.
+- `implementation=python, dry_run=true`: read real Spotify data and prepare metadata without writing history, caches, success or cursor state. Only an OAuth refresh-token rotation may be saved to preserve the working connection.
+- `implementation=typescript`: explicitly run the previous collector for troubleshooting or rollback. It uses the same state and encrypted credentials. To roll back automatic jobs, change the workflow's `implementation` default to `typescript`; the cron tasks can keep their existing bodies.
 
-Python local reauthorization is available as `.venv-python/bin/python -m spotify_logger authorize --env-file .env`. It uses the same `.env` keys, loopback callback and encrypted Sheet state. New workbook initialization is still manual as described above.
+Python was checked with local unit tests, cross-language token compatibility tests and real GitHub Actions shadow, collection and health runs before changing the default. A successful run with zero new events is expected when the previous run already collected them. New workbook initialization remains manual.
+
+For work on the fallback only, install Node.js 24+, run `npm ci` and `npm run verify`. Node is not required for Python collection or local reauthorization.
