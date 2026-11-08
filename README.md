@@ -63,8 +63,7 @@ spotify_logger/authorize.py  Local Spotify OAuth callback
 spotify_logger/__main__.py   CLI entrypoint
 requirements.txt             Locked Python dependencies
 requirements.in              Direct dependency pins
-tests_py/                    Python collector, crypto, health and recovery tests
-src/, scripts/, tests/       Previous TypeScript collector, retained for rollback
+tests/                    Python collector, crypto, health and recovery tests
 ```
 
 ## GitHub configuration
@@ -146,7 +145,7 @@ Use Python 3.12 or newer:
 ```sh
 python3.12 -m venv .venv-python
 .venv-python/bin/python -m pip install -r requirements.txt
-.venv-python/bin/python -m unittest discover -s tests_py -v
+.venv-python/bin/python -m unittest discover -s tests -v
 ```
 
 The tests cover enrichment, timestamp deduplication, write recovery, token rotation, shadow mode and health checks. Runtime dependencies are `requests` and `cryptography`; the test runner is Python's standard `unittest`. There is no frontend build or local web dashboard in this repository. Ordinary collection is restricted to the named GitHub workflow to preserve the single-writer guarantee.
@@ -175,15 +174,10 @@ The previous Sites application is no longer part of this flow. Its Google servic
 
 References: [GitHub workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event), [Actions notifications](https://docs.github.com/en/subscriptions-and-notifications/how-tos/managing-github-actions-notifications), [Spotify redirect URIs](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri), [cron-job.org FAQ](https://cron-job.org/en/faq/).
 
-## Validation and rollback
+## Validation and shadow mode
 
-Python is the default workflow implementation. Existing cron-job.org URLs, bodies, GitHub Secrets and Sheet schemas remain unchanged. The previous TypeScript implementation is retained as a temporary rollback option, with no separate schedule. All runs share `spotify-logger-sync`, so collection writes never overlap in this repository.
+The workflow runs the Python collector. Existing cron-job.org URLs, bodies, GitHub Secrets and Sheet schemas remain unchanged. Collection and health runs share `spotify-logger-sync` to serialize access.
 
-Manual workflow options:
+Manually dispatch with `dry_run=true` to read real Spotify data and prepare metadata without writing history, caches, success or cursor state. Only an OAuth refresh-token rotation may be saved to preserve the working connection.
 
-- `implementation=python, dry_run=true`: read real Spotify data and prepare metadata without writing history, caches, success or cursor state. Only an OAuth refresh-token rotation may be saved to preserve the working connection.
-- `implementation=typescript`: explicitly run the previous collector for troubleshooting or rollback. It uses the same state and encrypted credentials. To roll back automatic jobs, change the workflow's `implementation` default to `typescript`; the cron tasks can keep their existing bodies.
-
-Python was checked with local unit tests, cross-language token compatibility tests and real GitHub Actions shadow, collection and health runs before changing the default. A successful run with zero new events is expected when the previous run already collected them. New workbook initialization remains manual.
-
-For work on the fallback only, install Node.js 24+, run `npm ci` and `npm run verify`. Node is not required for Python collection or local reauthorization.
+The Python test suite covers enrichment, timestamp deduplication, recovery after lost write responses, token rotation, stored-token compatibility and health checks. Real GitHub Actions shadow, collection and health runs were also verified before switching from the previous collector. Historical implementations remain in Git history; there is no runtime language selector or Node dependency.
