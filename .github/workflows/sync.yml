@@ -1,13 +1,18 @@
 name: Spotify Logger Sync
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      check_only:
+        description: Verify Spotify connection without collecting log rows
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+# All dispatches, reruns and branches share one group. Never cancel an active writer.
+# Keep this group when editing or renaming the workflow.
 concurrency:
   group: spotify-logger-sync
   cancel-in-progress: false
@@ -15,31 +20,34 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: web
     steps:
-      - name: Run protected sync
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Collect Spotify history
         env:
-          SYNC_URL: https://spotify.daniildovbii.site/api/cron/sync
-          CRON_SECRET: ${{ secrets.SPOTIFY_LOGGER_CRON_SECRET }}
-        shell: bash
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          USER_SHEET_ID: ${{ secrets.USER_SHEET_ID }}
+          SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+          SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+          FERNET_KEY: ${{ secrets.FERNET_KEY }}
+          TOKEN_ENCRYPTION_KEY: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHECK_ONLY: ${{ inputs.check_only }}
         run: |
-          if [[ -z "$CRON_SECRET" ]]; then
-            echo "Required repository secret SPOTIFY_LOGGER_CRON_SECRET is missing."
-            exit 1
+          if [[ "$CHECK_ONLY" == "true" ]]; then
+            npm run sync -- --check
+          else
+            npm run sync
           fi
-
-          response_file="$(mktemp)"
-          status="$(curl --silent --show-error --location \
-            --output "$response_file" \
-            --write-out "%{http_code}" \
-            --request POST \
-            --header "Authorization: Bearer ${CRON_SECRET}" \
-            --header "Content-Type: application/json" \
-            "$SYNC_URL")"
-
-          if [[ "$status" -lt 200 || "$status" -ge 300 ]]; then
-            echo "Spotify sync request failed with HTTP ${status}."
-            exit 1
-          fi
-
-          echo "Spotify sync completed successfully."

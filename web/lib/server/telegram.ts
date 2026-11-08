@@ -11,6 +11,7 @@ async function telegramCall<T>(env: WorkerEnv, method: string, payload?: Record<
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload ?? {}),
+    signal: env.SYNC_ABORT_SIGNAL,
   });
   const result = await response.json() as TelegramResult<T>;
   if (!response.ok || !result.ok || result.result === undefined) {
