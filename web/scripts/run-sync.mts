@@ -1,4 +1,5 @@
 import { checkSpotifyConnection, runSync } from "../lib/server/sync";
+import { checkSyncHealth } from "../lib/server/sync-health";
 import { SpotifyInvalidGrantError } from "../lib/server/spotify";
 import type { WorkerEnv } from "../lib/types";
 
@@ -7,9 +8,10 @@ if (process.env.GITHUB_ACTIONS !== "true" || process.env.GITHUB_WORKFLOW !== "Sp
   console.error("Run this collector through the Spotify Logger Sync workflow, which serializes writes.");
   process.exitCode = 1;
 } else {
-  const keys = ["GOOGLE_SERVICE_ACCOUNT_JSON", "USER_SHEET_ID", "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"] as const;
+  const healthOnly = process.argv.includes("--health");
+  const keys = healthOnly ? ["GOOGLE_SERVICE_ACCOUNT_JSON", "USER_SHEET_ID"] : ["GOOGLE_SERVICE_ACCOUNT_JSON", "USER_SHEET_ID", "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"];
   const missing: string[] = keys.filter(key => !process.env[key]);
-  if (!process.env.TOKEN_ENCRYPTION_KEY && !process.env.FERNET_KEY) missing.push("TOKEN_ENCRYPTION_KEY or FERNET_KEY");
+  if (!healthOnly && !process.env.TOKEN_ENCRYPTION_KEY && !process.env.FERNET_KEY) missing.push("TOKEN_ENCRYPTION_KEY or FERNET_KEY");
   if (missing.length) {
     console.error(`Missing repository secrets: ${missing.join(", ")}`);
     process.exitCode = 1;
@@ -23,7 +25,10 @@ if (process.env.GITHUB_ACTIONS !== "true" || process.env.GITHUB_WORKFLOW !== "Sp
       SYNC_EXECUTION_MODE: "github-actions",
     };
     try {
-      if (process.argv.includes("--check")) {
+      if (healthOnly) {
+        await checkSyncHealth(env);
+        console.log("Logger health is OK: last successful sync is less than 30 minutes old.");
+      } else if (process.argv.includes("--check")) {
         await checkSpotifyConnection(env);
         console.log("Spotify connection verified. No listening log rows or sync cursor were changed.");
       } else {
@@ -33,7 +38,9 @@ if (process.env.GITHUB_ACTIONS !== "true" || process.env.GITHUB_WORKFLOW !== "Sp
     } catch (error) {
       // API error bodies can contain private values. Detailed state stays in the Sheet.
       if (error instanceof SpotifyInvalidGrantError) console.error("Stored Spotify authorization has expired or was revoked; reconnect Spotify locally.");
-      console.error("Spotify sync failed. Check credentials, Spotify authorization and the Sheet's __app_state status.");
+      console.error(healthOnly
+        ? "Logger health check failed: synchronization is stale, authorization is required, or the Sheet is unavailable. Check the latest collection run."
+        : "Spotify sync failed. Check credentials, Spotify authorization and the Sheet's __app_state status.");
       process.exitCode = 1;
     }
   }

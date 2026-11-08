@@ -70,3 +70,19 @@ A successful dispatch response only means GitHub accepted the command, not that 
 The API exposes a limited recent listening history; a prolonged outage can leave gaps. Private-repository Actions minute quotas also matter at five-minute frequency.
 
 References: [GitHub workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event), [workflow concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency), [cron-job.org FAQ](https://cron-job.org/en/faq/).
+
+## Email alerts and independent freshness probe
+
+In GitHub notification settings, keep **Actions → Email → Only notify for failed workflows**. For the account that owns the dispatch token, also enable Actions notifications for this repository. In cron-job.org job Notifications, enable failure after 1 failed request, recovery and automatic disable, and select only the account email channel.
+
+Create a second cron-job.org job **Spotify Logger Health**, every 15 minutes, with the same GitHub dispatch URL, POST method, authorization token and JSON headers. Its body must be:
+
+```json
+{"ref":"main","inputs":{"health_only":true}}
+```
+
+The health mode reads only `__app_state`: it fails when the last successful sync is at least 30 minutes old, reauthorization is required, or state is unreadable/invalid. It never calls Spotify or writes listening rows, tokens or sync state. An empty recent listening period is healthy as long as collection succeeds. Given a 15-minute probe schedule, missing sync should be detected approximately 30–45 minutes after the last success, plus runner delays. GitHub sends the failed-run email; cron-job.org catches failed dispatch requests. Enable the same email settings on this second job.
+
+This is independent of the primary job, not independent of the GitHub and cron-job.org platforms. If both platforms or the whole cron-job.org scheduling service stop, these alerts may also stop. A third-party dead-man service would be needed for that additional coverage.
+
+To verify email delivery without altering data, manually dispatch with `test_email=true`. This intentionally fails the job before collection or health checks. Keep this input false for normal jobs.
