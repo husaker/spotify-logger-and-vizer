@@ -13,6 +13,28 @@ flowchart LR
   Health -. stale or unavailable .-> Email
 ```
 
+## Set up your own copy from scratch
+
+Cloning the code alone does not start collection: you need your own GitHub repository, Google workbook/service account, Spotify application and cron-job.org account. No credentials or listening data are distributed with this repository.
+
+1. **Create your repository.** Fork this repository on GitHub, or push a clone into a new repository you own. Enable GitHub Actions in your copy if GitHub asks. Keep the workflow name `Spotify Logger Sync` and its concurrency group unchanged. The instructions below assume the default branch is `main`; otherwise use your actual default branch in every dispatch body.
+2. **Install and validate.** Install Node.js 24+, clone your copy locally, then run `npm ci` and `npm run verify` from its root.
+3. **Prepare Google access.** In a Google Cloud project, enable the Google Sheets API, create a service account and download its JSON key. Keep it in ignored `secrets/service_account.json`. Create a new Google workbook and share it with that JSON file's `client_email` as **Editor**. Copy the workbook ID from `/spreadsheets/d/<WORKBOOK_ID>/edit`.
+4. **Initialize the workbook.** Create all five worksheets listed in [Google Sheets schema](#google-sheets-schema), with exactly those names. Put the listed column headers in row 1, one header per cell, starting in column A. Leave data rows empty. In particular, `__app_state` initially needs only the `key` and `value` headers. The collector does not create these worksheets automatically.
+5. **Prepare Spotify.** Create your own application in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), register `http://127.0.0.1:8766/callback` (or another free loopback port), and copy its client ID and secret. Follow the app's user-allowlist requirements. Spotify currently requires the owner of a Development Mode app to have active Premium; see [quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) for current account/API restrictions.
+6. **Generate your own encryption key.** For a new installation, generate a Fernet-compatible 32-byte key with the command below. Copy `.env.example` to `.env`, fill your own values, and put that key in `FERNET_KEY`. Use the same key later in GitHub Secrets. Never reuse this repository owner's key or commit your populated `.env`.
+7. **Connect Spotify locally.** Run `npm run authorize` and approve access using the printed URL. The callback writes the first encrypted refresh token to your workbook. You do not need to copy a refresh token manually or obtain an old Sites token. Leave external cron tasks disabled until the connection is verified.
+8. **Configure Actions.** Add the required [repository secrets](#github-configuration) to your own repository. Run `Spotify Logger Sync` manually with `check_only=true`, then run it normally. Check that both runs succeed; the normal run should update `__app_state.last_sync_at`. A successful run may add zero listening events.
+9. **Enable the two cron tasks.** Follow [cron-job.org tasks](#cron-joborg-tasks), replacing the URL owner/repository with your copy. Create the dispatch token for your own repository, enable email alerts, and enable the health task only after the first successful collection. A clone's remote URL does not automatically change the cron URL, secrets or cloud settings.
+
+Generate a new encryption key locally (prints the key once so you can save it):
+
+```sh
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url') + '=')"
+```
+
+For example, `.env` and GitHub must refer to **your** workbook and Spotify application. Your local Google JSON file becomes the complete `GOOGLE_SERVICE_ACCOUNT_JSON` GitHub secret. The single-user collector does not use the old registry workbook or require the personal portfolio repository.
+
 ## How collection works
 
 1. GitHub serializes collection, connection checks and health probes using the `spotify-logger-sync` concurrency group. Active writers are never cancelled by a newer run.
@@ -55,7 +77,7 @@ Under **Settings → Secrets and variables → Actions**, configure:
 | `USER_SHEET_ID` | ID of the listening-history workbook, not a sheet tab's `gid`. |
 | `SPOTIFY_CLIENT_ID` | Spotify application client ID. |
 | `SPOTIFY_CLIENT_SECRET` | Spotify application client secret. |
-| `FERNET_KEY` | Existing key for `__app_state.refresh_token_enc`. This is the current setup. |
+| `FERNET_KEY` | Your Fernet key for `__app_state.refresh_token_enc`; generate a new key for a fresh installation or retain the original key for an existing workbook. |
 | `TOKEN_ENCRYPTION_KEY` | Optional alternative for `refresh_token_enc_v2`: a base64url-encoded 32-byte AES key. |
 
 Use the key matching the stored authorization. When both the v2 token and its key are configured, v2 is preferred. Bad decryption does not silently fall back to another token. Never put keys, refresh tokens or service-account JSON in commits, request URLs or workflow logs.
@@ -64,7 +86,7 @@ The GitHub token used by cron-job.org is separate from these secrets. Create a f
 
 ## Google Sheets schema
 
-Use an existing initialized workbook with these worksheets and columns in this order:
+For a new installation, create these five worksheets and put these headers in row 1 in the listed order. For an existing workbook, preserve its data and confirm the same schema:
 
 | Worksheet | Columns |
 | --- | --- |
@@ -78,10 +100,10 @@ Use an existing initialized workbook with these worksheets and columns in this o
 
 ## cron-job.org tasks
 
-Both tasks use this endpoint:
+Both tasks use this endpoint for **your own** GitHub repository (replace `<OWNER>` and `<REPO>`):
 
 ```text
-https://api.github.com/repos/husaker/spotify-logger-and-vizer/actions/workflows/sync.yml/dispatches
+https://api.github.com/repos/<OWNER>/<REPO>/actions/workflows/sync.yml/dispatches
 ```
 
 Use **POST** with these headers. Leave the separate HTTP Basic Authentication switch off.
@@ -97,7 +119,7 @@ Content-Type: application/json
 | Spotify Logger | Every 5 minutes | `{"ref":"main"}` |
 | Spotify Logger Health | Every 15 minutes | `{"ref":"main","inputs":{"health_only":true}}` |
 
-Keep both enabled. A successful HTTP dispatch means GitHub accepted the command, not that the collector succeeded. Check the corresponding Actions run for its actual result. The normal collection task should keep `health_only`, `check_only` and `test_email` false/default.
+After the first successful manual collection, keep both enabled. Replace `main` in both bodies if your default branch has another name. A successful HTTP dispatch means GitHub accepted the command, not that the collector succeeded. Check the corresponding Actions run for its actual result. The normal collection task should keep `health_only`, `check_only` and `test_email` false/default.
 
 ## Email alerts and health checks
 
