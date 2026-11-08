@@ -30,9 +30,6 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    defaults:
-      run:
-        working-directory: web
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,7 +38,7 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: package-lock.json
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
       - name: Collect Spotify history
@@ -52,7 +49,6 @@ jobs:
           SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
           FERNET_KEY: ${{ secrets.FERNET_KEY }}
           TOKEN_ENCRYPTION_KEY: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHECK_ONLY: ${{ inputs.check_only }}
           HEALTH_ONLY: ${{ inputs.health_only }}
           TEST_EMAIL: ${{ inputs.test_email }}
