@@ -3,6 +3,7 @@ import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 import { encryptFernet, decryptFernet } from "../lib/server/fernet.ts";
 import { encryptToken, decryptToken } from "../lib/server/crypto.ts";
+import { checkSyncHealth } from "../lib/server/sync-health.ts";
 import { checkSpotifyConnection, runSync } from "../lib/server/sync.ts";
 
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -95,4 +96,17 @@ test("connection check uses the existing Fernet secret and does not collect or a
   assert.equal(await decryptFernet(Object.fromEntries(f.state).refresh_token_enc, key), "rotated-refresh");
   assert.equal((await runSync(f.env)).added, 2);
   assert.equal((await runSync(f.env)).added, 0);
+});
+
+test("health probe only reads Sheet state and never writes success or calls Spotify", async t => {
+  const f = await fixture(t);
+  f.state.push(["last_sync_at", new Date().toISOString()]);
+  const before = structuredClone(f.state);
+  await checkSyncHealth(f.env);
+  assert.deepEqual(f.state, before);
+  assert.equal(f.log.length, 0);
+  assert.equal(f.calls.some(url => url.includes("spotify.com")), false);
+  f.state[f.state.length - 1][1] = "2020-01-01T00:00:00Z";
+  await assert.rejects(() => checkSyncHealth(f.env), /30 minutes/);
+  assert.equal(f.state[f.state.length - 1][1], "2020-01-01T00:00:00Z");
 });

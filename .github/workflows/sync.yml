@@ -1,8 +1,17 @@
 name: Spotify Logger Sync
+run-name: ${{ inputs.test_email && 'TEST — Spotify Logger email alert' || inputs.health_only && 'Spotify Logger — health check' || 'Spotify Logger — collection' }}
 
 on:
   workflow_dispatch:
     inputs:
+      test_email:
+        description: Intentionally fail once to test GitHub email alerts (no collection)
+        type: boolean
+        default: false
+      health_only:
+        description: Alert if no successful collection was recorded for 30 minutes
+        type: boolean
+        default: false
       check_only:
         description: Verify Spotify connection without collecting log rows
         type: boolean
@@ -45,8 +54,15 @@ jobs:
           TOKEN_ENCRYPTION_KEY: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHECK_ONLY: ${{ inputs.check_only }}
+          HEALTH_ONLY: ${{ inputs.health_only }}
+          TEST_EMAIL: ${{ inputs.test_email }}
         run: |
-          if [[ "$CHECK_ONLY" == "true" ]]; then
+          if [[ "$TEST_EMAIL" == "true" ]]; then
+            echo "::error::TEST email alert: intentional failure; listening data and credentials were not changed."
+            exit 1
+          elif [[ "$HEALTH_ONLY" == "true" ]]; then
+            npm run sync -- --health
+          elif [[ "$CHECK_ONLY" == "true" ]]; then
             npm run sync -- --check
           else
             npm run sync
